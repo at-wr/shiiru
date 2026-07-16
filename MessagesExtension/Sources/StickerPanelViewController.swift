@@ -507,6 +507,7 @@ final class EntityTypeSwitcher: UIView {
             return button
         }
         selectedTag = selected
+        invalidateIntrinsicContentSize()
         setNeedsLayout()
         layoutIfNeeded()
         refreshColors()
@@ -549,6 +550,6 @@ final class EntityTypeSwitcher: UIView {
     }
 
     override var intrinsicContentSize: CGSize {
-        CGSize(width: CGFloat(max(buttons.count, 1)) * 96, height: 36)
+        CGSize(width: CGFloat(max(buttons.count, 1)) * 104, height: 36)
     }
 }

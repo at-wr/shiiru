@@ -115,6 +115,7 @@ final class StickerSyncEngine: ObservableObject {
             guard !animations.isEmpty else { throw ShiiruError.conversionFailed }
 
             let directory = try store.prepareDirectory(forPackID: key)
+            let syncToken = String(UUID().uuidString.prefix(6))
             var completed = 0.0
             var manifestStickers: [StickerManifest.Sticker] = []
 
@@ -133,7 +134,7 @@ final class StickerSyncEngine: ObservableObject {
                         return try StickerConverter.convertAnimatedImage(at: path)
                     }.value
                     let fileName = String(
-                        format: "%03d-v%d.%@", index, StickerConverter.pipelineVersion, output.fileExtension
+                        format: "%03d-%@.%@", index, syncToken, output.fileExtension
                     )
                     try output.data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
                     manifestStickers.append(StickerManifest.Sticker(
@@ -175,6 +176,7 @@ final class StickerSyncEngine: ObservableObject {
             guard !stickers.isEmpty else { throw ShiiruError.conversionFailed }
 
             let directory = try store.prepareDirectory(forPackID: key)
+            let syncToken = String(UUID().uuidString.prefix(6))
             var completed = 0.0
             let total = Double(stickers.count)
             var manifestStickers: [StickerManifest.Sticker] = []
@@ -189,7 +191,7 @@ final class StickerSyncEngine: ObservableObject {
                     let output = try await convert(sticker: sticker)
 
                     let fileName = String(
-                        format: "%03d-v%d.%@", index, StickerConverter.pipelineVersion, output.fileExtension
+                        format: "%03d-%@.%@", index, syncToken, output.fileExtension
                     )
                     try output.data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
                     manifestStickers.append(StickerManifest.Sticker(
