@@ -12,6 +12,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     private var sets: [StickerSetInfo] = []
     private var emojiSets: [StickerSetInfo] = []
     private var gifCount = 0
+    private var gifCoverFile: File?
     private let kindSwitcher = UISegmentedControl(items: ["Stickers", "Emoji", "GIFs"])
     private var currentKind: Int { kindSwitcher.selectedSegmentIndex }
     private var visibleSets: [StickerSetInfo] { currentKind == 1 ? emojiSets : sets }
@@ -49,10 +50,8 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         tableView.separatorInset = UIEdgeInsets(top: 0, left: 80, bottom: 0, right: 0)
         kindSwitcher.selectedSegmentIndex = 0
         kindSwitcher.addTarget(self, action: #selector(kindChanged), for: .valueChanged)
-        let header = UIView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 44))
-        kindSwitcher.frame = CGRect(x: 16, y: 6, width: view.bounds.width - 32, height: 32)
-        kindSwitcher.autoresizingMask = [.flexibleWidth]
-        header.addSubview(kindSwitcher)
+        let header = SwitcherHeaderView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 44))
+        header.install(kindSwitcher)
         tableView.tableHeaderView = header
 
         tableView.frame = view.bounds
@@ -135,7 +134,9 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             }
             sets = arrange(fetched)
             emojiSets = (try? await TelegramService.shared.customEmojiSets()) ?? []
-            gifCount = (try? await TelegramService.shared.savedAnimations().count) ?? 0
+            let animations = (try? await TelegramService.shared.savedAnimations()) ?? []
+            gifCount = animations.count
+            gifCoverFile = animations.first?.thumbnail?.file
             sync.prefetchCovers(for: sets)
             reconvertStalePacks()
             tableView.reloadData()
@@ -275,6 +276,15 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             cell.onToggle = { [weak self] enabled in
                 self?.sync.setGifSyncEnabled(enabled)
             }
+            if let file = gifCoverFile {
+                Task { [weak cell] in
+                    if let path = try? await TelegramService.shared.download(file: file),
+                       let image = UIImage(contentsOfFile: path),
+                       cell?.representedID == key {
+                        cell?.setThumbnail(image)
+                    }
+                }
+            }
             return cell
         }
         configure(cell, with: visibleSets[indexPath.row])
@@ -393,4 +403,21 @@ private final class EmptyStateView: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+}
+
+/// Table header that keeps the kind switcher inside the readable width
+/// regardless of when the table resizes it.
+private final class SwitcherHeaderView: UIView {
+    private weak var switcher: UISegmentedControl?
+
+    func install(_ control: UISegmentedControl) {
+        switcher = control
+        addSubview(control)
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        switcher?.frame = bounds.insetBy(dx: 16, dy: 6)
+    }
 }
