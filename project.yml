@@ -85,7 +85,7 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UIUserInterfaceStyle: Automatic
-        ITSAppUsesNonExemptEncryption: true
+        ITSAppUsesNonExemptEncryption: false
         UIRequiresFullScreen: true
         CFBundleURLTypes:
           - CFBundleURLName: dev.alany.shiiru
