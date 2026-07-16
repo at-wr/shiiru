@@ -259,7 +259,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
         sets.isEmpty
             ? nil
-            : "Enabled packs appear in Messages: open a conversation, tap ‘+’, and choose Shiiru. Hold and drag a pack to re-arrange."
+            : "Enabled packs appear in Messages: open a conversation, tap ‘+’, and scroll to the bottom of the menu — Shiiru appears last until you use it a few times. Hold and drag a pack to re-arrange."
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {

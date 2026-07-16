@@ -214,8 +214,8 @@ final class HowToViewController: UIViewController {
         let steps: [(String, String)] = [
             ("1", "Open Messages and go to any conversation."),
             ("2", "Tap the ‘+’ button next to the text field."),
-            ("3", "Choose Shiiru from the app list."),
-            ("4", "Tap a sticker to send it, or drag it onto any bubble."),
+            ("3", "Scroll to the bottom of the menu — newly installed iMessage apps like Shiiru appear last."),
+            ("4", "Tap Shiiru, then tap a sticker to send it — or drag it onto any bubble."),
         ]
 
         let stack = UIStackView()
