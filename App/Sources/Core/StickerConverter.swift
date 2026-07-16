@@ -11,7 +11,7 @@ enum StickerConverter {
 
     static let maxFileSize = 500_000
 
-    static let pipelineVersion = 8
+    static let pipelineVersion = 9
 
     static let playbackPixelBudget = 8_000_000
 
@@ -44,7 +44,7 @@ enum StickerConverter {
         }
     }
 
-    static func convertStaticImage(at path: String) throws -> Data {
+    static func convertStaticImage(at path: String, fillCanvas fill: Bool = false) throws -> Data {
         let url = URL(fileURLWithPath: path)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
@@ -67,7 +67,7 @@ enum StickerConverter {
     }
 
     @MainActor
-    static func convertTGS(at path: String) async throws -> Output {
+    static func convertTGS(at path: String, fillCanvas fill: Bool = false) async throws -> Output {
         let raw = try Data(contentsOf: URL(fileURLWithPath: path))
         let json = try gunzip(raw)
         let animation = try LottieAnimation.from(data: json)
@@ -154,7 +154,7 @@ enum StickerConverter {
         return frames
     }
 
-    static func convertWebm(at path: String) throws -> Output {
+    static func convertWebm(at path: String, fillCanvas fill: Bool = false) throws -> Output {
         guard let decoded = WebmStickerDecoder.decodeFrames(atPath: path, maxFrames: 90),
               !decoded.isEmpty
         else { throw ShiiruError.conversionFailed }
@@ -376,6 +376,58 @@ enum StickerConverter {
             return .png(data)
         }
         throw ShiiruError.conversionFailed
+    }
+
+    // MARK: - Emoji canvas filling
+
+    /// Union alpha bounding box across frames (sampled every other pixel).
+    private static func contentBounds(of frames: [CGImage]) -> CGRect? {
+        var minX = Int.max, minY = Int.max, maxX = -1, maxY = -1
+        for image in frames {
+            let w = image.width, h = image.height
+            var pixels = [UInt8](repeating: 0, count: w * h * 4)
+            let ok = pixels.withUnsafeMutableBytes { raw -> Bool in
+                guard let ctx = CGContext(
+                    data: raw.baseAddress, width: w, height: h,
+                    bitsPerComponent: 8, bytesPerRow: w * 4,
+                    space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                ) else { return false }
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                return true
+            }
+            guard ok else { continue }
+            for y in stride(from: 0, to: h, by: 2) {
+                for x in stride(from: 0, to: w, by: 2) where pixels[(y * w + x) * 4 + 3] > 12 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                    if y < minY { minY = y }
+                    if y > maxY { maxY = y }
+                }
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        return CGRect(
+            x: max(0, minX - 3), y: max(0, minY - 3),
+            width: min(frames[0].width, maxX - minX + 7),
+            height: min(frames[0].height, maxY - minY + 7)
+        )
+    }
+
+    /// Custom emoji ship on canvases their artwork often barely occupies;
+    /// crop every frame to the shared content box (plus a small margin) and
+    /// upscale so the glyph fills the sticker instead of floating in it.
+    static func fillCanvas(_ frames: [CGImage], side: Int) -> [CGImage] {
+        guard let bounds = contentBounds(of: frames) else { return frames }
+        let canvas = CGFloat(frames[0].width)
+        // Leave well-composed art alone.
+        if bounds.width >= canvas * 0.86 && bounds.height >= canvas * 0.86 { return frames }
+        return frames.map { image in
+            guard let cropped = image.cropping(to: bounds),
+                  let scaled = scale(cropped, toFit: side, exact: true)
+            else { return image }
+            return scaled
+        }
     }
 
     static func gunzip(_ data: Data) throws -> Data {

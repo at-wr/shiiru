@@ -238,20 +238,24 @@ final class StickerSyncEngine: ObservableObject {
     }
 
     private func convert(sticker: Sticker) async throws -> StickerConverter.Output {
+        // Custom emoji artwork rarely fills its canvas; crop and enlarge it
+        // so the glyph doesn't float inside a mostly-empty sticker.
+        var fill = false
+        if case .stickerFullTypeCustomEmoji = sticker.fullType { fill = true }
         switch sticker.format {
         case .stickerFormatWebp:
             let path = try await telegram.download(file: sticker.sticker)
-            return .png(try await Task.detached(priority: .userInitiated) {
-                try StickerConverter.convertStaticImage(at: path)
+            return .png(try await Task.detached(priority: .userInitiated) { [fill] in
+                try StickerConverter.convertStaticImage(at: path, fillCanvas: fill)
             }.value)
         case .stickerFormatTgs:
             let path = try await telegram.download(file: sticker.sticker)
-            return try await StickerConverter.convertTGS(at: path)
+            return try await StickerConverter.convertTGS(at: path, fillCanvas: fill)
         case .stickerFormatWebm:
 
             let path = try await telegram.download(file: sticker.sticker)
-            if let animated = try? await Task.detached(priority: .userInitiated, operation: {
-                try StickerConverter.convertWebm(at: path)
+            if let animated = try? await Task.detached(priority: .userInitiated, operation: { [fill] in
+                try StickerConverter.convertWebm(at: path, fillCanvas: fill)
             }).value {
                 return animated
             }
