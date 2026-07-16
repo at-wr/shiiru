@@ -205,6 +205,7 @@ final class TelegramService: ObservableObject {
             synchronous: true
         )
         guard downloaded.local.isDownloadingCompleted, !downloaded.local.path.isEmpty else {
+            NSLog("[Shiiru] download incomplete for file %d", file.id)
             throw ShiiruError.downloadFailed
         }
         return downloaded.local.path
