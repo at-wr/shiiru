@@ -25,25 +25,38 @@ final class SharedStickerStore {
         AppGroup.stickersDirectory.appendingPathComponent(packID, isDirectory: true)
     }
 
-    func prepareDirectory(forPackID packID: String) throws -> URL {
-        let url = directoryURL(forPackID: packID)
+    func prepareDirectory(named name: String) throws -> URL {
+        let url = AppGroup.stickersDirectory.appendingPathComponent(name, isDirectory: true)
         try? fileManager.removeItem(at: url)
         try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
     func upsert(pack: StickerManifest.Pack) {
+        let stale = loadManifest().packs
+            .filter { $0.id == pack.id && $0.directoryName != pack.directoryName }
+            .map(\.directoryName)
         mutateManifest { manifest in
             manifest.packs.removeAll { $0.id == pack.id }
             manifest.packs.append(pack)
         }
+        for directory in stale {
+            try? fileManager.removeItem(
+                at: AppGroup.stickersDirectory.appendingPathComponent(directory, isDirectory: true)
+            )
+        }
     }
 
     func removePack(id: String) {
+        let directories = loadManifest().packs.filter { $0.id == id }.map(\.directoryName)
         mutateManifest { manifest in
             manifest.packs.removeAll { $0.id == id }
         }
-        try? fileManager.removeItem(at: directoryURL(forPackID: id))
+        for directory in directories + [id] {
+            try? fileManager.removeItem(
+                at: AppGroup.stickersDirectory.appendingPathComponent(directory, isDirectory: true)
+            )
+        }
     }
 
     func removeAll() {

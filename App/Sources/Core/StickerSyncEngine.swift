@@ -114,8 +114,9 @@ final class StickerSyncEngine: ObservableObject {
             let animations = try await telegram.savedAnimations()
             guard !animations.isEmpty else { throw ShiiruError.conversionFailed }
 
-            let directory = try store.prepareDirectory(forPackID: key)
             let syncToken = String(UUID().uuidString.prefix(6))
+            let directoryName = "\(key)-\(syncToken)"
+            let directory = try store.prepareDirectory(named: directoryName)
             var completed = 0.0
             var manifestStickers: [StickerManifest.Sticker] = []
 
@@ -154,6 +155,7 @@ final class StickerSyncEngine: ObservableObject {
                 isAnimated: true,
                 kind: "gif",
                 converterVersion: StickerConverter.pipelineVersion,
+                directory: directoryName,
                 stickers: manifestStickers
             ))
             phases[key] = .synced
@@ -175,8 +177,9 @@ final class StickerSyncEngine: ObservableObject {
             let stickers = set.stickers
             guard !stickers.isEmpty else { throw ShiiruError.conversionFailed }
 
-            let directory = try store.prepareDirectory(forPackID: key)
             let syncToken = String(UUID().uuidString.prefix(6))
+            let directoryName = "\(key)-\(syncToken)"
+            let directory = try store.prepareDirectory(named: directoryName)
             var completed = 0.0
             let total = Double(stickers.count)
             var manifestStickers: [StickerManifest.Sticker] = []
@@ -218,6 +221,7 @@ final class StickerSyncEngine: ObservableObject {
                 isAnimated: stickers.contains { $0.format == .stickerFormatTgs },
                 kind: info.stickerType == .stickerTypeCustomEmoji ? "emoji" : "sticker",
                 converterVersion: StickerConverter.pipelineVersion,
+                directory: directoryName,
                 stickers: manifestStickers
             ))
             phases[key] = .synced

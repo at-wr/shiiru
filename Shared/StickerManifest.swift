@@ -25,9 +25,12 @@ struct StickerManifest: Codable, Equatable {
         var kind: String? = nil
 
         var converterVersion: Int?
+        /// On-disk directory; tokened per sync so Messages can never serve
+        /// cached renders for stale URLs. Falls back to id for old manifests.
+        var directory: String? = nil
         var stickers: [Sticker]
 
-        var directoryName: String { id }
+        var directoryName: String { directory ?? id }
         var packKind: String { kind ?? "sticker" }
     }
 

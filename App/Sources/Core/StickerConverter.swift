@@ -11,7 +11,7 @@ enum StickerConverter {
 
     static let maxFileSize = 500_000
 
-    static let pipelineVersion = 7
+    static let pipelineVersion = 8
 
     static let playbackPixelBudget = 8_000_000
 

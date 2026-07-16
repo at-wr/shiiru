@@ -106,7 +106,7 @@ enum DemoSession {
 
     private static func install(_ pack: Pack) {
         let store = SharedStickerStore.shared
-        guard let directory = try? store.prepareDirectory(forPackID: pack.id) else { return }
+        guard let directory = try? store.prepareDirectory(named: pack.id) else { return }
         var manifestStickers: [StickerManifest.Sticker] = []
         for (index, face) in pack.faces.enumerated() {
             guard let data = stickerData(for: face) else { continue }

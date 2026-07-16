@@ -82,18 +82,6 @@ enum CountryCodes {
         explicitPattern(forDialCode: code) ?? "XXX XXX XXXX"
     }
 
-    /// Length-aware grouping for countries without an explicit convention —
-    /// an 8-digit Estonian number must not be squeezed into US 3-3-4.
-    private static func dynamicPattern(digitCount: Int) -> String {
-        switch digitCount {
-        case ...6: return "XXX XXX"
-        case 7: return "XXX XXXX"
-        case 8: return "XXXX XXXX"
-        case 9: return "XXX XXX XXX"
-        case 11: return "XXX XXXX XXXX"
-        default: return "XXX XXX XXXX"
-        }
-    }
 
     static func formatInternational(_ digits: String) -> String {
         let digits = digits.filter(\.isNumber)
