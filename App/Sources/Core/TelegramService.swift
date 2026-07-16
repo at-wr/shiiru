@@ -22,6 +22,8 @@ final class TelegramService: ObservableObject {
 
     @Published private(set) var authState: AuthState = .starting
     @Published private(set) var user: User?
+    /// True while TDLib's network connection is fully established.
+    @Published private(set) var isConnected = false
 
     private let manager = TDLibClientManager()
     private var client: TDLibClient!
@@ -45,6 +47,8 @@ final class TelegramService: ObservableObject {
         switch update {
         case .updateAuthorizationState(let state):
             handle(authorizationState: state.authorizationState)
+        case .updateConnectionState(let update):
+            isConnected = update.state == .connectionStateReady
         default:
             break
         }

@@ -83,6 +83,15 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             .sink { [weak self] _ in self?.reloadVisibleRows() }
             .store(in: &cancellables)
 
+        // The moment TDLib's connection comes up, re-run cover loading for
+        // anything that raced ahead of it on first login.
+        TelegramService.shared.$isConnected
+            .removeDuplicates()
+            .filter { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.tableView.reloadData() }
+            .store(in: &cancellables)
+
         loadingSpinner.startAnimating()
         Task { await load() }
     }

@@ -97,7 +97,7 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
     }
 
     func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        "Made with ♥ and TDLib. Shiiru is open source under the GNU GPL v2.0 or later."
+        "Made with ♥ and TDLib."
     }
 
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
