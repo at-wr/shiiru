@@ -389,26 +389,27 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
 final class StickerCell: UICollectionViewCell {
     static let reuseIdentifier = "StickerCell"
 
-    private let stickerView = MSStickerView()
+    private var stickerView: MSStickerView?
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        stickerView.frame = contentView.bounds
-        stickerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        contentView.addSubview(stickerView)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
+    /// MSStickerView loads its image asynchronously and keeps the previous
+    /// sticker's rendering on reuse, which showed wrong artwork in fast
+    /// scrolls and after tab switches. A fresh view per configure guarantees
+    /// the displayed art always matches the attached sticker.
     func configure(sticker: MSSticker) {
-        stickerView.sticker = sticker
-        stickerView.startAnimating()
+        stickerView?.stopAnimating()
+        stickerView?.removeFromSuperview()
+        let view = MSStickerView(frame: contentView.bounds, sticker: sticker)
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(view)
+        view.startAnimating()
+        stickerView = view
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        stickerView.stopAnimating()
-        stickerView.sticker = nil
+        stickerView?.stopAnimating()
+        stickerView?.removeFromSuperview()
+        stickerView = nil
     }
 }
 
