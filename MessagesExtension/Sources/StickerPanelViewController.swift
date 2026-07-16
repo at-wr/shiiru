@@ -7,7 +7,7 @@ final class StickerPanelViewController: UIViewController {
     private enum Mode: Int { case emoji = 0, stickers = 1, gifs = 2 }
     private var mode: Mode = .stickers
     private var packsByMode: [Int: [LoadedPack]] = [:]
-    private let typeSwitcher = UISegmentedControl(items: ["Emoji", "Stickers", "GIFs"])
+    private let typeSwitcher = EntityTypeSwitcher()
 
     var onOpenApp: (() -> Void)?
 
@@ -81,8 +81,11 @@ final class StickerPanelViewController: UIViewController {
         settingsButton.tintColor = .secondaryLabel
         settingsButton.addTarget(self, action: #selector(openApp), for: .touchUpInside)
 
-        typeSwitcher.selectedSegmentIndex = Mode.stickers.rawValue
-        typeSwitcher.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
+        typeSwitcher.onSelect = { [weak self] tag in
+            guard let self else { return }
+            self.mode = Mode(rawValue: tag) ?? .stickers
+            self.applyMode()
+        }
 
         for subview in [settingsButton, tabBar, separator, grid, typeSwitcher] {
             subview.translatesAutoresizingMaskIntoConstraints = false
@@ -112,10 +115,10 @@ final class StickerPanelViewController: UIViewController {
             grid.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             grid.bottomAnchor.constraint(equalTo: typeSwitcher.topAnchor, constant: -6),
 
-            typeSwitcher.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
-            typeSwitcher.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             typeSwitcher.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
-            typeSwitcher.heightAnchor.constraint(equalToConstant: 32),
+            typeSwitcher.heightAnchor.constraint(equalToConstant: 36),
+            typeSwitcher.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
+            typeSwitcher.centerXAnchor.constraint(equalTo: view.centerXAnchor),
         ])
     }
 
@@ -151,6 +154,17 @@ final class StickerPanelViewController: UIViewController {
             Mode.stickers.rawValue: all.filter { $0.pack.packKind == "sticker" },
             Mode.gifs.rawValue: all.filter { $0.pack.packKind == "gif" },
         ]
+        // Only synced categories appear, exactly like Telegram's panel.
+        let available: [(String, Int)] = [
+            ("Emoji", Mode.emoji.rawValue),
+            ("Stickers", Mode.stickers.rawValue),
+            ("GIFs", Mode.gifs.rawValue),
+        ].filter { !(packsByMode[$0.1] ?? []).isEmpty }
+        typeSwitcher.isHidden = available.count <= 1
+        if !available.contains(where: { $0.1 == mode.rawValue }) {
+            mode = Mode(rawValue: available.first?.1 ?? Mode.stickers.rawValue) ?? .stickers
+        }
+        typeSwitcher.setItems(available, selected: mode.rawValue)
         applyMode()
         let isEmpty = packs.isEmpty
         emptyState.isHidden = !isEmpty
@@ -192,11 +206,6 @@ final class StickerPanelViewController: UIViewController {
         let itemSize: CGFloat = 44, itemSpacing: CGFloat = 6, sideInset: CGFloat = 10
         let reveal = frame.insetBy(dx: -(sideInset + (itemSize + itemSpacing) * 2), dy: 0)
         tabBar.scrollRectToVisible(reveal, animated: animated)
-    }
-
-    @objc private func modeChanged() {
-        mode = Mode(rawValue: typeSwitcher.selectedSegmentIndex) ?? .stickers
-        applyMode()
     }
 
     /// Swaps the visible content set and relayouts the grid for the mode —
@@ -458,5 +467,87 @@ private extension UIImage {
         return UIGraphicsImageRenderer(size: newSize).image { _ in
             draw(in: CGRect(origin: .zero, size: newSize))
         }
+    }
+}
+
+/// Telegram-style entity-type switcher: a blurred capsule bar with a
+/// sliding highlight pill behind the selected type (a reimplementation of
+/// the look of Telegram's EntityKeyboardBottomPanel).
+final class EntityTypeSwitcher: UIView {
+
+    var onSelect: ((Int) -> Void)?
+
+    private let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+    private let highlight = UIView()
+    private var buttons: [UIButton] = []
+    private var selectedTag = 1
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        blur.frame = bounds
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        blur.clipsToBounds = true
+        addSubview(blur)
+        highlight.backgroundColor = UIColor.tertiarySystemFill
+        blur.contentView.addSubview(highlight)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setItems(_ items: [(String, Int)], selected: Int) {
+        buttons.forEach { $0.removeFromSuperview() }
+        buttons = items.map { title, tag in
+            let button = UIButton(type: .system)
+            button.setTitle(title, for: .normal)
+            button.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+            button.tag = tag
+            button.addTarget(self, action: #selector(tapped(_:)), for: .touchUpInside)
+            blur.contentView.addSubview(button)
+            return button
+        }
+        selectedTag = selected
+        setNeedsLayout()
+        layoutIfNeeded()
+        refreshColors()
+    }
+
+    @objc private func tapped(_ sender: UIButton) {
+        guard sender.tag != selectedTag else { return }
+        selectedTag = sender.tag
+        refreshColors()
+        UIView.animate(
+            withDuration: 0.35, delay: 0,
+            usingSpringWithDamping: 0.8, initialSpringVelocity: 0
+        ) {
+            self.positionHighlight()
+        }
+        onSelect?(sender.tag)
+    }
+
+    private func refreshColors() {
+        for button in buttons {
+            button.setTitleColor(button.tag == selectedTag ? .label : .secondaryLabel, for: .normal)
+        }
+    }
+
+    private func positionHighlight() {
+        guard let selected = buttons.first(where: { $0.tag == selectedTag }) else { return }
+        highlight.frame = selected.frame.insetBy(dx: 2, dy: 3)
+        highlight.layer.cornerRadius = highlight.frame.height / 2
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        blur.layer.cornerRadius = bounds.height / 2
+        guard !buttons.isEmpty else { return }
+        let width = bounds.width / CGFloat(buttons.count)
+        for (index, button) in buttons.enumerated() {
+            button.frame = CGRect(x: CGFloat(index) * width, y: 0, width: width, height: bounds.height)
+        }
+        positionHighlight()
+    }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: CGFloat(max(buttons.count, 1)) * 96, height: 36)
     }
 }
