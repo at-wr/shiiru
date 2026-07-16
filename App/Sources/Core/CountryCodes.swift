@@ -54,7 +54,8 @@ enum CountryCodes {
         "212": "MA", "262": "RE", "590": "GP", "596": "MQ", "47": "NO",
     ]
 
-    static func numberPattern(forDialCode code: String) -> String {
+    /// Grouping for countries whose conventions we know explicitly.
+    private static func explicitPattern(forDialCode code: String) -> String? {
         switch code {
         case "1": return "XXX XXX XXXX"
         case "7": return "XXX XXX XX XX"
@@ -66,10 +67,29 @@ enum CountryCodes {
         case "91": return "XXXXX XXXXX"
         case "61": return "XXX XXX XXX"
         case "55": return "XX XXXXX XXXX"
-        case "852", "65": return "XXXX XXXX"
+        case "852", "853", "65", "372", "371": return "XXXX XXXX"
+        case "370": return "XXX XXXXX"
         case "971", "966": return "XX XXX XXXX"
         case "380", "375": return "XX XXX XX XX"
         case "48", "31", "32", "46", "41", "43", "30", "351", "420", "36": return "XXX XXX XXX"
+        default: return nil
+        }
+    }
+
+    /// Placeholder pattern shown before any digits are typed.
+    static func numberPattern(forDialCode code: String) -> String {
+        explicitPattern(forDialCode: code) ?? "XXX XXX XXXX"
+    }
+
+    /// Length-aware grouping for countries without an explicit convention —
+    /// an 8-digit Estonian number must not be squeezed into US 3-3-4.
+    private static func dynamicPattern(digitCount: Int) -> String {
+        switch digitCount {
+        case ...6: return "XXX XXX"
+        case 7: return "XXX XXXX"
+        case 8: return "XXXX XXXX"
+        case 9: return "XXX XXX XXX"
+        case 11: return "XXX XXXX XXXX"
         default: return "XXX XXX XXXX"
         }
     }
@@ -83,7 +103,8 @@ enum CountryCodes {
     }
 
     static func format(nationalDigits digits: String, dialCode: String) -> String {
-        let pattern = numberPattern(forDialCode: dialCode)
+        let pattern = explicitPattern(forDialCode: dialCode)
+            ?? dynamicPattern(digitCount: digits.count)
         var result = ""
         var index = digits.startIndex
         for slot in pattern where index < digits.endIndex {
