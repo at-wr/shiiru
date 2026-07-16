@@ -166,6 +166,14 @@ final class TelegramService: ObservableObject {
         try await client.getInstalledStickerSets(stickerType: .stickerTypeRegular).sets
     }
 
+    func customEmojiSets() async throws -> [StickerSetInfo] {
+        try await client.getInstalledStickerSets(stickerType: .stickerTypeCustomEmoji).sets
+    }
+
+    func savedAnimations() async throws -> [Animation] {
+        try await client.getSavedAnimations().animations
+    }
+
     func stickerSet(id: TdInt64) async throws -> StickerSet {
         try await client.getStickerSet(setId: id)
     }

@@ -19,6 +19,10 @@ settings:
     ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: "NO"
 
 packages:
+  PhoneNumberKit:
+    url: https://github.com/marmelroy/PhoneNumberKit
+    minVersion: 3.7.0
+    maxVersion: 3.9.9
   TDLibKit:
     url: https://github.com/Swiftgram/TDLibKit
     exactVersion: "1.5.2-tdlib-1.8.66-07d3a097"
@@ -53,6 +57,7 @@ targets:
       - package: TDLibKit
       - package: Lottie
         product: Lottie
+      - package: PhoneNumberKit
       - target: StickerCore
       - target: MessagesExtension
         embed: true

@@ -3,6 +3,12 @@ import Messages
 
 final class StickerPanelViewController: UIViewController {
 
+    /// Telegram's entity keyboard exposes three content types.
+    private enum Mode: Int { case emoji = 0, stickers = 1, gifs = 2 }
+    private var mode: Mode = .stickers
+    private var packsByMode: [Int: [LoadedPack]] = [:]
+    private let typeSwitcher = UISegmentedControl(items: ["Emoji", "Stickers", "GIFs"])
+
     var onOpenApp: (() -> Void)?
 
     private var programmaticScrollTarget: Int?
@@ -75,7 +81,10 @@ final class StickerPanelViewController: UIViewController {
         settingsButton.tintColor = .secondaryLabel
         settingsButton.addTarget(self, action: #selector(openApp), for: .touchUpInside)
 
-        for subview in [settingsButton, tabBar, separator, grid] {
+        typeSwitcher.selectedSegmentIndex = Mode.stickers.rawValue
+        typeSwitcher.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
+
+        for subview in [settingsButton, tabBar, separator, grid, typeSwitcher] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
         }
@@ -101,7 +110,12 @@ final class StickerPanelViewController: UIViewController {
             grid.topAnchor.constraint(equalTo: separator.bottomAnchor),
             grid.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             grid.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            grid.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            grid.bottomAnchor.constraint(equalTo: typeSwitcher.topAnchor, constant: -6),
+
+            typeSwitcher.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
+            typeSwitcher.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
+            typeSwitcher.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
+            typeSwitcher.heightAnchor.constraint(equalToConstant: 32),
         ])
     }
 
@@ -131,8 +145,13 @@ final class StickerPanelViewController: UIViewController {
                 return LoadedPack(pack: pack, stickers: stickers, tabIcon: icon)
             }
 
-        tabBar.reloadData()
-        grid.reloadData()
+        let all = packs
+        packsByMode = [
+            Mode.emoji.rawValue: all.filter { $0.pack.packKind == "emoji" },
+            Mode.stickers.rawValue: all.filter { $0.pack.packKind == "sticker" },
+            Mode.gifs.rawValue: all.filter { $0.pack.packKind == "gif" },
+        ]
+        applyMode()
         let isEmpty = packs.isEmpty
         emptyState.isHidden = !isEmpty
         tabBar.isHidden = isEmpty
@@ -173,6 +192,25 @@ final class StickerPanelViewController: UIViewController {
         let itemSize: CGFloat = 44, itemSpacing: CGFloat = 6, sideInset: CGFloat = 10
         let reveal = frame.insetBy(dx: -(sideInset + (itemSize + itemSpacing) * 2), dy: 0)
         tabBar.scrollRectToVisible(reveal, animated: animated)
+    }
+
+    @objc private func modeChanged() {
+        mode = Mode(rawValue: typeSwitcher.selectedSegmentIndex) ?? .stickers
+        applyMode()
+    }
+
+    /// Swaps the visible content set and relayouts the grid for the mode —
+    /// dense emoji cells, regular sticker cells, or Telegram's edge-to-edge
+    /// three-column GIF mosaic.
+    private func applyMode() {
+        packs = packsByMode[mode.rawValue] ?? []
+        tabBar.isHidden = mode == .gifs
+        grid.setCollectionViewLayout(makeGridLayout(), animated: false)
+        tabBar.reloadData()
+        grid.reloadData()
+        if !packs.isEmpty {
+            tabBar.selectItem(at: IndexPath(item: 0, section: 0), animated: false, scrollPosition: [])
+        }
     }
 
     @objc private func openApp() {
@@ -220,9 +258,28 @@ final class StickerPanelViewController: UIViewController {
     }
 
     private func makeGridLayout() -> UICollectionViewLayout {
-        UICollectionViewCompositionalLayout { _, environment in
+        let mode = self.mode
+        return UICollectionViewCompositionalLayout { _, environment in
             let width = environment.container.effectiveContentSize.width
-            let columns = max(3, Int(width / 92))
+            if mode == .gifs {
+                // Telegram GIF mosaic: >=3 square columns, hairline gaps.
+                let columns = max(3, Int(width / 120))
+                let item = NSCollectionLayoutItem(layoutSize: .init(
+                    widthDimension: .fractionalWidth(1.0 / CGFloat(columns)),
+                    heightDimension: .fractionalWidth(1.0 / CGFloat(columns))
+                ))
+                item.contentInsets = NSDirectionalEdgeInsets(top: 0.5, leading: 0.5, bottom: 0.5, trailing: 0.5)
+                let group = NSCollectionLayoutGroup.horizontal(
+                    layoutSize: .init(
+                        widthDimension: .fractionalWidth(1),
+                        heightDimension: .fractionalWidth(1.0 / CGFloat(columns))
+                    ),
+                    subitems: [item]
+                )
+                return NSCollectionLayoutSection(group: group)
+            }
+            // Emoji uses Telegram's dense 8-per-row grid; stickers stay large.
+            let columns = mode == .emoji ? max(8, Int(width / 44)) : max(3, Int(width / 92))
             let item = NSCollectionLayoutItem(layoutSize: .init(
                 widthDimension: .fractionalWidth(1.0 / CGFloat(columns)),
                 heightDimension: .fractionalWidth(1.0 / CGFloat(columns))

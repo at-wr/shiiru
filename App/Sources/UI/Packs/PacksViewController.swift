@@ -10,6 +10,11 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     private let loadingSpinner = UIActivityIndicatorView(style: .large)
 
     private var sets: [StickerSetInfo] = []
+    private var emojiSets: [StickerSetInfo] = []
+    private var gifCount = 0
+    private let kindSwitcher = UISegmentedControl(items: ["Stickers", "Emoji", "GIFs"])
+    private var currentKind: Int { kindSwitcher.selectedSegmentIndex }
+    private var visibleSets: [StickerSetInfo] { currentKind == 1 ? emojiSets : sets }
 
     private var newPackIDs: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
@@ -42,6 +47,14 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         tableView.register(PackCell.self, forCellReuseIdentifier: PackCell.reuseIdentifier)
         tableView.backgroundColor = .clear
         tableView.separatorInset = UIEdgeInsets(top: 0, left: 80, bottom: 0, right: 0)
+        kindSwitcher.selectedSegmentIndex = 0
+        kindSwitcher.addTarget(self, action: #selector(kindChanged), for: .valueChanged)
+        let header = UIView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 44))
+        kindSwitcher.frame = CGRect(x: 16, y: 6, width: view.bounds.width - 32, height: 32)
+        kindSwitcher.autoresizingMask = [.flexibleWidth]
+        header.addSubview(kindSwitcher)
+        tableView.tableHeaderView = header
+
         tableView.frame = view.bounds
         tableView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         tableView.preferSoftTopEdge()
@@ -121,6 +134,8 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                 fetched = try await TelegramService.shared.installedStickerSets()
             }
             sets = arrange(fetched)
+            emojiSets = (try? await TelegramService.shared.customEmojiSets()) ?? []
+            gifCount = (try? await TelegramService.shared.savedAnimations().count) ?? 0
             sync.prefetchCovers(for: sets)
             reconvertStalePacks()
             tableView.reloadData()
@@ -220,15 +235,22 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     private func reloadVisibleRows() {
         for indexPath in tableView.indexPathsForVisibleRows ?? [] {
             guard let cell = tableView.cellForRow(at: indexPath) as? PackCell,
-                  indexPath.row < sets.count else { continue }
-            configure(cell, with: sets[indexPath.row])
+                  indexPath.row < visibleSets.count, currentKind != 2 else {
+                tableView.reloadData(); continue
+            }
+            configure(cell, with: visibleSets[indexPath.row])
         }
     }
 
     func numberOfSections(in tableView: UITableView) -> Int { 1 }
 
+    @objc private func kindChanged() {
+        Haptics.tap()
+        tableView.reloadData()
+    }
+
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        sets.count
+        currentKind == 2 ? 1 : visibleSets.count
     }
 
     func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
@@ -241,7 +263,21 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         let cell = tableView.dequeueReusableCell(
             withIdentifier: PackCell.reuseIdentifier, for: indexPath
         ) as! PackCell
-        configure(cell, with: sets[indexPath.row])
+        if currentKind == 2 {
+            let key = StickerSyncEngine.gifsPackID
+            cell.representedID = key
+            cell.configure(
+                title: "Saved GIFs",
+                subtitle: gifCount > 0 ? "\(gifCount) GIFs from Telegram" : "Your saved GIFs from Telegram",
+                phase: sync.phases[key] ?? .idle,
+                isNew: false
+            )
+            cell.onToggle = { [weak self] enabled in
+                self?.sync.setGifSyncEnabled(enabled)
+            }
+            return cell
+        }
+        configure(cell, with: visibleSets[indexPath.row])
         return cell
     }
 
@@ -281,7 +317,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     }
 
     func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        true
+        currentKind == 0
     }
 
     func tableView(

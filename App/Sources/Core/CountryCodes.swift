@@ -1,4 +1,5 @@
 import Foundation
+import PhoneNumberKit
 
 struct Country: Equatable {
     let iso: String
@@ -102,27 +103,19 @@ enum CountryCodes {
         return formatted.isEmpty ? "+\(country.dialCode)" : "+\(country.dialCode) \(formatted)"
     }
 
+    private static var formatters: [String: PartialFormatter] = [:]
+
     static func format(nationalDigits digits: String, dialCode: String) -> String {
-        let pattern = explicitPattern(forDialCode: dialCode)
-            ?? dynamicPattern(digitCount: digits.count)
-        var result = ""
-        var index = digits.startIndex
-        for slot in pattern where index < digits.endIndex {
-            if slot == "X" {
-                result.append(digits[index])
-                index = digits.index(after: index)
-            } else {
-                result.append(slot)
-            }
+        guard !digits.isEmpty else { return digits }
+        let region = country(forDialPrefix: dialCode)?.iso ?? "US"
+        let formatter: PartialFormatter
+        if let cached = formatters[region] {
+            formatter = cached
+        } else {
+            formatter = PartialFormatter(defaultRegion: region, withPrefix: false)
+            formatters[region] = formatter
         }
-        var overflowCount = 0
-        while index < digits.endIndex {
-            if overflowCount.isMultiple(of: 2) { result.append(" ") }
-            result.append(digits[index])
-            index = digits.index(after: index)
-            overflowCount += 1
-        }
-        return result
+        return formatter.formatPartial(digits)
     }
 
     private static let table = """

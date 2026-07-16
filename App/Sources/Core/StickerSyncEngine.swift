@@ -82,6 +82,92 @@ final class StickerSyncEngine: ObservableObject {
         phases[id] = synced ? .synced : .idle
     }
 
+    // MARK: - Saved GIFs
+
+    static let gifsPackID = "gifs"
+
+    func setGifSyncEnabled(_ enabled: Bool) {
+        let key = Self.gifsPackID
+        if enabled {
+            guard tasks[key] == nil else { return }
+            phases[key] = .syncing(progress: 0)
+            let predecessor = syncChain
+            let task = Task { [weak self] in
+                _ = await predecessor?.value
+                if !Task.isCancelled {
+                    await self?.syncGifs(key: key)
+                }
+                self?.tasks[key] = nil
+            }
+            tasks[key] = task
+            syncChain = task
+        } else {
+            tasks[key]?.cancel()
+            tasks[key] = nil
+            store.removePack(id: key)
+            phases[key] = .idle
+        }
+    }
+
+    private func syncGifs(key: String) async {
+        do {
+            let animations = try await telegram.savedAnimations()
+            guard !animations.isEmpty else { throw ShiiruError.conversionFailed }
+
+            let directory = try store.prepareDirectory(forPackID: key)
+            var completed = 0.0
+            var manifestStickers: [StickerManifest.Sticker] = []
+
+            for animation in animations {
+                _ = try? await telegram.downloadFile(startingOnly: animation.animation)
+            }
+            for (index, animation) in animations.enumerated() {
+                try Task.checkCancellation()
+                do {
+                    let path = try await telegram.download(file: animation.animation)
+                    let isVideo = animation.mimeType.hasPrefix("video")
+                    let output: StickerConverter.Output = try await Task.detached(priority: .userInitiated) {
+                        if isVideo {
+                            return try await StickerConverter.convertVideo(at: path)
+                        }
+                        return try StickerConverter.convertAnimatedImage(at: path)
+                    }.value
+                    let fileName = String(
+                        format: "%03d-v%d.%@", index, StickerConverter.pipelineVersion, output.fileExtension
+                    )
+                    try output.data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
+                    manifestStickers.append(StickerManifest.Sticker(
+                        fileName: fileName, emoji: "", isAnimated: output.isAnimated
+                    ))
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    NSLog("[Shiiru] Skipping GIF \(index): \(error)")
+                }
+                completed += 1
+                phases[key] = .syncing(progress: completed / Double(animations.count))
+            }
+            guard !manifestStickers.isEmpty else { throw ShiiruError.conversionFailed }
+            store.upsert(pack: StickerManifest.Pack(
+                id: key, name: key, title: "GIFs",
+                isAnimated: true,
+                kind: "gif",
+                converterVersion: StickerConverter.pipelineVersion,
+                stickers: manifestStickers
+            ))
+            phases[key] = .synced
+            Haptics.success()
+        } catch is CancellationError {
+            store.removePack(id: key)
+            phases[key] = .idle
+        } catch {
+            store.removePack(id: key)
+            let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription
+            phases[key] = .failed(message: message)
+            Haptics.error()
+        }
+    }
+
     private func sync(info: StickerSetInfo, key: String) async {
         do {
             let set = try await telegram.stickerSet(id: info.id)
@@ -102,7 +188,9 @@ final class StickerSyncEngine: ObservableObject {
                 do {
                     let output = try await convert(sticker: sticker)
 
-                    let fileName = String(format: "%03d-v%d.png", index, StickerConverter.pipelineVersion)
+                    let fileName = String(
+                        format: "%03d-v%d.%@", index, StickerConverter.pipelineVersion, output.fileExtension
+                    )
                     try output.data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
                     manifestStickers.append(StickerManifest.Sticker(
                         fileName: fileName,
@@ -126,6 +214,7 @@ final class StickerSyncEngine: ObservableObject {
                 name: set.name,
                 title: set.title,
                 isAnimated: stickers.contains { $0.format == .stickerFormatTgs },
+                kind: info.stickerType == .stickerTypeCustomEmoji ? "emoji" : "sticker",
                 converterVersion: StickerConverter.pipelineVersion,
                 stickers: manifestStickers
             ))

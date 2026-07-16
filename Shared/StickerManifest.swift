@@ -21,10 +21,14 @@ struct StickerManifest: Codable, Equatable {
 
         var isAnimated: Bool
 
+        /// "sticker" (default), "emoji", or "gif".
+        var kind: String? = nil
+
         var converterVersion: Int?
         var stickers: [Sticker]
 
         var directoryName: String { id }
+        var packKind: String { kind ?? "sticker" }
     }
 
     struct Sticker: Codable, Equatable {

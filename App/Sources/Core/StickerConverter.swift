@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import StickerCore
 import UIKit
 import ImageIO
@@ -21,16 +22,25 @@ enum StickerConverter {
     enum Output {
         case png(Data)
         case apng(Data)
+        /// Pass-through GIF (MSSticker accepts GIF natively).
+        case gif(Data)
 
         var data: Data {
             switch self {
-            case .png(let data), .apng(let data): return data
+            case .png(let data), .apng(let data), .gif(let data): return data
             }
         }
 
         var isAnimated: Bool {
-            if case .apng = self { return true }
-            return false
+            switch self {
+            case .png: return false
+            case .apng, .gif: return true
+            }
+        }
+
+        var fileExtension: String {
+            if case .gif = self { return "gif" }
+            return "png"
         }
     }
 
@@ -270,6 +280,102 @@ enum StickerConverter {
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(origin: .zero, size: newSize))
         return context.makeImage()
+    }
+
+
+    // MARK: - Saved GIFs (animated GIF / MP4 in, GIF or APNG out)
+
+    /// Animated GIF: pass through untouched when already within the sticker
+    /// budget (best quality), otherwise re-encode through the APNG ladder.
+    static func convertAnimatedImage(at path: String) throws -> Output {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0
+        else { throw ShiiruError.conversionFailed }
+
+        let count = CGImageSourceGetCount(source)
+        if count > 1, data.count <= maxFileSize {
+            return .gif(data)
+        }
+
+        var frames: [(CGImage, Double)] = []
+        for index in 0..<count {
+            guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
+            var delay = 0.1
+            if let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+               let gif = properties[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+                delay = (gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double)
+                    ?? (gif[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
+            }
+            frames.append((image, max(delay, 0.02)))
+        }
+        return try encodeFrameLadder(frames)
+    }
+
+    /// MP4 saved animations: decode with AVFoundation, encode as APNG.
+    static func convertVideo(at path: String) async throws -> Output {
+        let url = URL(fileURLWithPath: path)
+        // AVFoundation wants a recognizable extension.
+        let linked = url.deletingPathExtension().appendingPathExtension("mp4")
+        if linked != url, !FileManager.default.fileExists(atPath: linked.path) {
+            try? FileManager.default.linkItem(at: url, to: linked)
+        }
+        let asset = AVURLAsset(url: FileManager.default.fileExists(atPath: linked.path) ? linked : url)
+        let seconds = min((try? await asset.load(.duration).seconds) ?? 3, 5)
+        guard seconds > 0 else { throw ShiiruError.conversionFailed }
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        generator.maximumSize = CGSize(width: 512, height: 512)
+
+        let fps = 18.0
+        let frameCount = max(2, Int(seconds * fps))
+        let delay = seconds / Double(frameCount)
+        var frames: [(CGImage, Double)] = []
+        for index in 0..<frameCount {
+            let time = CMTime(seconds: Double(index) * delay, preferredTimescale: 600)
+            if let image = try? generator.copyCGImage(at: time, actualTime: nil) {
+                frames.append((image, delay))
+            }
+        }
+        return try encodeFrameLadder(frames)
+    }
+
+    /// Shared quality ladder over pre-decoded frames.
+    private static func encodeFrameLadder(_ source: [(CGImage, Double)]) throws -> Output {
+        guard !source.isEmpty else { throw ShiiruError.conversionFailed }
+        let attempts: [(side: Int, maxFrames: Int)] = [
+            (408, 60), (352, 45), (320, 36), (288, 27), (256, 20)
+        ]
+        let totalDuration = source.reduce(0) { $0 + $1.1 }
+        var firstFrame: CGImage?
+        for attempt in attempts {
+            let step = max(1, source.count / attempt.maxFrames)
+            let picked = stride(from: 0, to: source.count, by: step).map { source[$0] }
+            let delay = totalDuration / Double(picked.count)
+            let frames: [APNGEncoder.Frame] = picked.compactMap { frame, _ in
+                guard let scaled = scale(frame, toFit: attempt.side, exact: true) else { return nil }
+                return APNGEncoder.Frame(image: scaled, delay: delay)
+            }
+            guard let first = frames.first else { continue }
+            firstFrame = firstFrame ?? first.image
+            if let data = APNGEncoder.encode(
+                frames: frames,
+                width: first.image.width,
+                height: first.image.height,
+                byteBudget: maxFileSize
+            ), data.count <= maxFileSize {
+                return frames.count > 1 ? .apng(data) : .png(data)
+            }
+        }
+        if let first = firstFrame,
+           let data = APNGEncoder.encodeStatic(first, width: first.width, height: first.height),
+           data.count <= maxFileSize {
+            return .png(data)
+        }
+        throw ShiiruError.conversionFailed
     }
 
     static func gunzip(_ data: Data) throws -> Data {
