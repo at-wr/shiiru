@@ -7,10 +7,11 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
 
     private enum Row {
         case version
+        case github
         case license
     }
 
-    private let rows: [Row] = [.version, .license]
+    private let rows: [Row] = [.version, .github, .license]
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -109,6 +110,12 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
                 title: "Version \(Bundle.main.appVersion)",
                 accessory: .none
             )
+        case .github:
+            cell.configure(
+                icon: "chevron.left.forwardslash.chevron.right", color: UIColor(hex: 0x1C1C1E),
+                title: "Source on GitHub",
+                accessory: .disclosure
+            )
         case .license:
             cell.configure(
                 icon: "doc.text.fill", color: UIColor(hex: 0x34C759),
@@ -125,6 +132,8 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
         case .version:
             UIPasteboard.general.string = "Shiiru \(Bundle.main.appVersion)"
             Haptics.success()
+        case .github:
+            UIApplication.shared.open(URL(string: "https://github.com/at-wr/shiiru")!)
         case .license:
             navigationController?.pushViewController(
                 TextPageViewController(title: "GNU GPL v2.0 or later", text: OpenSourceLicenses.gplv2),
