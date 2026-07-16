@@ -52,7 +52,7 @@ final class PrivacyPolicyViewController: UIViewController {
 
         let textView = UITextView()
         textView.text = Self.policyText
-        textView.font = Theme.bodyFont()
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
         textView.textColor = .label
         textView.isEditable = false
         textView.alwaysBounceVertical = true
