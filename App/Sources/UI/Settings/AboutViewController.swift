@@ -9,9 +9,10 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
         case version
         case github
         case license
+        case reportProblem
     }
 
-    private let rows: [Row] = [.version, .github, .license]
+    private let rows: [Row] = [.version, .github, .license, .reportProblem]
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -112,14 +113,20 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
             )
         case .github:
             cell.configure(
-                icon: "chevron.left.forwardslash.chevron.right", color: UIColor(hex: 0x1C1C1E),
+                icon: "chevron.left.forwardslash.chevron.right", color: Theme.accent,
                 title: "Source on GitHub",
                 accessory: .disclosure
             )
         case .license:
             cell.configure(
-                icon: "doc.text.fill", color: UIColor(hex: 0x34C759),
+                icon: "doc.text.fill", color: UIColor(hex: 0xFFC400),
                 title: "GNU GPL v2.0 or later",
+                accessory: .disclosure
+            )
+        case .reportProblem:
+            cell.configure(
+                icon: "exclamationmark.bubble.fill", color: UIColor(hex: 0xFF2D55),
+                title: "Report a Problem",
                 accessory: .disclosure
             )
         }
@@ -134,6 +141,8 @@ final class AboutViewController: UIViewController, UITableViewDataSource, UITabl
             Haptics.success()
         case .github:
             UIApplication.shared.open(URL(string: "https://github.com/at-wr/shiiru")!)
+        case .reportProblem:
+            UIApplication.shared.open(URL(string: "https://github.com/at-wr/shiiru/issues")!)
         case .license:
             navigationController?.pushViewController(
                 TextPageViewController(title: "GNU GPL v2.0 or later", text: OpenSourceLicenses.gplv2),
