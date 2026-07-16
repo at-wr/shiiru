@@ -24,5 +24,11 @@ final class MessagesViewController: MSMessagesAppViewController {
     override func willBecomeActive(with conversation: MSConversation) {
         super.willBecomeActive(with: conversation)
         panel.reload()
+        panel.startWatchingManifest()
+    }
+
+    override func didBecomeActive(with conversation: MSConversation) {
+        super.didBecomeActive(with: conversation)
+        panel.reloadIfManifestChanged()
     }
 }

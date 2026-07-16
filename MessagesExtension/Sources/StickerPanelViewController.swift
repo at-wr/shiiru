@@ -8,6 +8,8 @@ final class StickerPanelViewController: UIViewController {
     private var mode: Mode = .stickers
     private var packsByMode: [Int: [LoadedPack]] = [:]
     private let typeSwitcher = EntityTypeSwitcher()
+    private var manifestWatcher: DispatchSourceFileSystemObject?
+    private var loadedManifestStamp: Date?
 
     var onOpenApp: (() -> Void)?
 
@@ -122,8 +124,34 @@ final class StickerPanelViewController: UIViewController {
         ])
     }
 
+    /// Watches manifest.json so a logout / re-sync in the main app updates
+    /// the panel even while Messages keeps this extension process alive.
+    func startWatchingManifest() {
+        manifestWatcher?.cancel()
+        let fd = open(AppGroup.manifestURL.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            self?.reloadIfManifestChanged()
+            // Recreate after delete/rename, which invalidates the descriptor.
+            self?.startWatchingManifest()
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        manifestWatcher = source
+    }
+
+    func reloadIfManifestChanged() {
+        let manifest = SharedStickerStore.shared.loadManifest()
+        guard manifest.updatedAt != loadedManifestStamp else { return }
+        reload()
+    }
+
     func reload() {
         let manifest = SharedStickerStore.shared.loadManifest()
+        loadedManifestStamp = manifest.updatedAt
 
         let savedOrder = UserDefaults(suiteName: AppGroup.identifier)?
             .stringArray(forKey: "packOrder") ?? []
