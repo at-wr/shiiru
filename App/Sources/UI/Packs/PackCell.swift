@@ -136,6 +136,9 @@ final class PackCell: UITableViewCell {
 
     func setThumbnail(_ image: UIImage?) {
         guard let image, animationView.animation == nil else { return }
+        // Re-configures fire on every sync progress tick; only transition
+        // when the image actually changes (covers are NSCache'd instances).
+        guard thumbnailView.image !== image else { return }
         UIView.transition(with: thumbnailView, duration: 0.2, options: .transitionCrossDissolve) {
             self.thumbnailView.image = image
         }
@@ -143,11 +146,22 @@ final class PackCell: UITableViewCell {
 
     func setAnimatedThumbnail(_ animation: LottieAnimation?) {
         guard let animation else { return }
-        thumbnailView.image = nil
+        // Same animation already installed: leave it playing untouched —
+        // resetting it every phase update made covers flash and restart.
+        if animationView.animation === animation {
+            if !animationView.isAnimationPlaying { animationView.play() }
+            return
+        }
+        // Keep the static cover visible underneath while the animation
+        // fades in, so the handoff never blanks the cell.
         animationView.animation = animation
         animationView.alpha = 0
         animationView.play()
-        UIView.animate(withDuration: 0.2) { self.animationView.alpha = 1 }
+        UIView.animate(withDuration: 0.2) {
+            self.animationView.alpha = 1
+        } completion: { _ in
+            self.thumbnailView.image = nil
+        }
     }
 
     @objc private func toggled() {
