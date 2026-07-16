@@ -96,6 +96,7 @@ final class ProfileCell: UITableViewCell {
     private let avatarGradient = CAGradientLayer()
     private let nameLabel = UILabel()
     private let detailLabel = UILabel()
+    private var avatarLoadID = UUID()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: .default, reuseIdentifier: reuseIdentifier)
@@ -103,12 +104,18 @@ final class ProfileCell: UITableViewCell {
 
         avatarGradient.startPoint = CGPoint(x: 0.5, y: 0)
         avatarGradient.endPoint = CGPoint(x: 0.5, y: 1)
+        avatarGradient.colors = [
+            Self.emptyGradient.top.cgColor,
+            Self.emptyGradient.bottom.cgColor,
+        ]
 
         let base = UIFont.systemFont(ofSize: 26, weight: .bold)
         initialsLabel.font = base.fontDescriptor.withDesign(.rounded).map { UIFont(descriptor: $0, size: 26) } ?? base
         initialsLabel.textColor = .white
         initialsLabel.textAlignment = .center
+        initialsLabel.text = "?"
 
+        avatarView.backgroundColor = Self.emptyGradient.bottom
         avatarView.layer.insertSublayer(avatarGradient, at: 0)
         avatarView.layer.cornerRadius = 30
         avatarView.clipsToBounds = true
@@ -148,10 +155,23 @@ final class ProfileCell: UITableViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         avatarGradient.frame = avatarView.bounds
+        CATransaction.commit()
         initialsLabel.frame = avatarView.bounds
         avatarImageView.frame = avatarView.bounds
         avatarImageView.layer.cornerRadius = avatarView.bounds.width / 2
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        avatarLoadID = UUID()
+        avatarImageView.image = nil
+        avatarImageView.isHidden = true
+        avatarImageView.alpha = 1
+        initialsLabel.text = "?"
+        applyGradient(Self.emptyGradient)
     }
 
     func configure(name: String, phone: String?, userID: Int64?) {
@@ -160,9 +180,10 @@ final class ProfileCell: UITableViewCell {
 
         let pair = userID.map { Self.gradientPalette[abs(Int(clamping: $0)) % Self.gradientPalette.count] }
             ?? Self.emptyGradient
-        avatarGradient.colors = [pair.top.cgColor, pair.bottom.cgColor]
+        applyGradient(pair)
         let initials = name.split(separator: " ").prefix(2).compactMap(\.first)
-        initialsLabel.text = String(initials).uppercased()
+        let initialsText = String(initials).uppercased()
+        initialsLabel.text = initialsText.isEmpty ? "?" : initialsText
 
         if let cached = TelegramService.shared.cachedAvatarImage {
             avatarImageView.image = cached
@@ -173,12 +194,24 @@ final class ProfileCell: UITableViewCell {
 
         avatarImageView.image = nil
         avatarImageView.isHidden = true
+        avatarImageView.alpha = 1
+        let loadID = UUID()
+        avatarLoadID = loadID
         Task { [weak self] in
             guard let image = await TelegramService.shared.avatarImage() else { return }
-            self?.avatarImageView.image = image
-            self?.avatarImageView.isHidden = false
-            self?.avatarImageView.alpha = 0
-            UIView.animate(withDuration: 0.2) { self?.avatarImageView.alpha = 1 }
+            guard let self, self.avatarLoadID == loadID else { return }
+            self.avatarImageView.image = image
+            self.avatarImageView.isHidden = false
+            self.avatarImageView.alpha = 0
+            UIView.animate(withDuration: 0.2) { self.avatarImageView.alpha = 1 }
         }
+    }
+
+    private func applyGradient(_ pair: (top: UIColor, bottom: UIColor)) {
+        avatarView.backgroundColor = pair.bottom
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        avatarGradient.colors = [pair.top.cgColor, pair.bottom.cgColor]
+        CATransaction.commit()
     }
 }

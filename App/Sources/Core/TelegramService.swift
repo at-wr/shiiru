@@ -109,6 +109,7 @@ final class TelegramService: ObservableObject {
 
     private func refreshUser() async {
         user = try? await client.getMe()
+        _ = await avatarImage()
     }
 
     private var avatarCache: (fileID: Int, image: UIImage)?

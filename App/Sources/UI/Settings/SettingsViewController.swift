@@ -1,4 +1,5 @@
 import UIKit
+import Combine
 
 final class SettingsViewController: UITableViewController {
 
@@ -20,6 +21,8 @@ final class SettingsViewController: UITableViewController {
         (nil, [.clearSynced, .logOut]),
     ]
 
+    private var cancellables = Set<AnyCancellable>()
+
     init() {
         super.init(style: .insetGrouped)
         title = "Settings"
@@ -32,6 +35,14 @@ final class SettingsViewController: UITableViewController {
         tableView.register(IconRowCell.self, forCellReuseIdentifier: IconRowCell.reuseIdentifier)
         tableView.register(ProfileCell.self, forCellReuseIdentifier: ProfileCell.reuseIdentifier)
         tableView.preferSoftTopEdge()
+
+        TelegramService.shared.$user
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.isViewLoaded else { return }
+                self.tableView.reloadData()
+            }
+            .store(in: &cancellables)
     }
 
     override func viewWillAppear(_ animated: Bool) {
