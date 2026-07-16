@@ -107,9 +107,7 @@ final class PhoneNumberViewController: OnboardingStepViewController, UITextField
     private func applyCountry() {
         countryButton.configuration?.title = "\(country.flag)  \(country.name)"
         codeField.text = "+\(country.dialCode)"
-        numberField.placeholder = CountryCodes
-            .numberPattern(forDialCode: country.dialCode)
-            .replacingOccurrences(of: "X", with: "0")
+        numberField.placeholder = CountryCodes.placeholder(forCountry: country.iso)
         reformatNumber()
     }
 

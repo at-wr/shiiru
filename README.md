@@ -4,8 +4,9 @@
 
 Shiiru is a native UIKit iOS app that logs into your Telegram account (via
 [TDLib](https://core.telegram.org/tdlib), Telegram's official client library),
-lets you pick your installed sticker packs, converts them to iMessage-compatible
-formats, and serves them through a bundled iMessage extension — with a
+lets you pick your installed sticker packs, custom emoji, and saved GIFs,
+converts them to iMessage-compatible formats, and serves them through a
+bundled iMessage extension — with a
 Telegram-fluent UI: spring animations, haptics, animated Lottie pack covers,
 and a sticker panel that behaves exactly like Apple's own.
 
@@ -19,7 +20,7 @@ and a sticker panel that behaves exactly like Apple's own.
 │ StickerConverter                      │      │ pack tabs + grid  │
 │   WEBP → PNG                          │─────▶│ MSStickerView     │
 │   TGS  → APNG (Lottie, ≤500 KB)       │ app  │ tap-to-send /     │
-│   WEBM → PNG (thumbnail)              │ group│ drag-to-peel      │
+│   WEBM → APNG (libvpx VP9+alpha)      │ group│ drag-to-peel      │
 │ manifest.json + sticker files         │      │                   │
 └───────────────────────────────────────┘      └───────────────────┘
 ```
@@ -67,6 +68,8 @@ Telegram directly from the device, and stickers stay on-device.
 | WEBP (static) | PNG 512 px | decoded natively by ImageIO |
 | TGS (animated Lottie) | animated APNG | rendered with Lottie at up to 512 px/30 fps; a custom median-cut + Floyd–Steinberg indexed APNG encoder (pngquant-style) keeps files under Apple's 500 KB sticker limit at full quality |
 | WEBM (video) | animated APNG | VP9 (+alpha in BlockAdditions) decoded with a vendored libvpx build and a purpose-built WebM demuxer |
+| Custom emoji (100 px) | PNG/APNG | cropped to the artwork's alpha bounding box and enlarged to fill the sticker canvas |
+| Saved GIFs | GIF / APNG | GIFs pass through untouched when within 500 KB; MP4 animations decode via AVFoundation |
 
 ## Testing
 
@@ -102,7 +105,8 @@ Tests/                    Converter unit tests + fixtures
 
 - Extremely complex or long animated stickers may reduce frame rate or fall
   back to a static frame to respect Apple's 500 KB limit.
-- Custom-emoji packs are not synced (regular sticker packs only).
+- Premium-only interactive effects of custom emoji are not reproduced;
+  they sync as regular animated stickers.
 
 ## License & acknowledgements
 
@@ -113,6 +117,7 @@ v2.0 or later](LICENSE) (SPDX: GPL-2.0-or-later, Copyright © 2026 Alan Ye). It 
 - [TDLibKit](https://github.com/Swiftgram/TDLibKit) — MIT
 - [Lottie](https://github.com/airbnb/lottie-ios) — Apache 2.0
 - [libvpx](https://github.com/webmproject/libvpx) — BSD-3-Clause (vendored VP9 decoder)
+- [PhoneNumberKit](https://github.com/marmelroy/PhoneNumberKit) — MIT (phone number formatting)
 - [Telegram-iOS](https://github.com/TelegramMessenger/Telegram-iOS) — GPL-2.0-or-later (login monkey animations)
 
 Full license texts are shown in-app under Settings → Acknowledgements.

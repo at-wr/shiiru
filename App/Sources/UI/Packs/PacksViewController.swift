@@ -105,7 +105,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
 
     @objc private func syncAll() {
         Haptics.tap()
-        for info in sets where sync.phase(for: info.id) == .idle {
+        for info in sets + emojiSets where sync.phase(for: info.id) == .idle {
             if DemoSession.isActive {
                 DemoSession.setPack(id: String(info.id.rawValue), enabled: true)
             } else {
@@ -237,11 +237,10 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     }
 
     private func reloadVisibleRows() {
+        if currentKind == 2 { tableView.reloadData(); return }
         for indexPath in tableView.indexPathsForVisibleRows ?? [] {
             guard let cell = tableView.cellForRow(at: indexPath) as? PackCell,
-                  indexPath.row < visibleSets.count, currentKind != 2 else {
-                tableView.reloadData(); continue
-            }
+                  indexPath.row < visibleSets.count, currentKind != 2 else { continue }
             configure(cell, with: visibleSets[indexPath.row])
         }
     }

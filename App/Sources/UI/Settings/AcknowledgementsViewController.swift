@@ -37,6 +37,22 @@ final class AcknowledgementsViewController: UITableViewController {
             color: UIColor(hex: 0x8774E1)
         ),
         Entry(
+            name: "libvpx",
+            detail: "",
+            license: "BSD-3-Clause",
+            licenseText: OpenSourceLicenses.libvpxBSD,
+            icon: "film.fill",
+            color: UIColor(hex: 0x34C759)
+        ),
+        Entry(
+            name: "PhoneNumberKit",
+            detail: "",
+            license: "MIT License",
+            licenseText: OpenSourceLicenses.phoneNumberKitMIT,
+            icon: "phone.fill",
+            color: UIColor(hex: 0x5856D6)
+        ),
+        Entry(
             name: "Lottie",
             detail: "Airbnb's animation engine, used to render animated TGS stickers.",
             license: "Apache License 2.0",
