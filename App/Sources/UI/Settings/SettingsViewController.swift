@@ -6,6 +6,7 @@ final class SettingsViewController: UITableViewController {
     private enum Row {
         case account
         case autoAdd
+        case transcode
         case howTo
         case privacy
         case acknowledgements
@@ -16,7 +17,7 @@ final class SettingsViewController: UITableViewController {
 
     private let sections: [(title: String?, rows: [Row])] = [
         (nil, [.account]),
-        ("Stickers", [.autoAdd]),
+        (nil, [.autoAdd, .transcode]),
         (nil, [.howTo, .privacy, .acknowledgements, .about]),
         (nil, [.clearSynced, .logOut]),
     ]
@@ -111,6 +112,12 @@ final class SettingsViewController: UITableViewController {
                     Preferences.autoAddNewPacks = enabled
                 }
             )
+        case .transcode:
+            cell.configure(
+                icon: TranscodePreset.current.symbolName, color: UIColor(hex: 0xAF52DE),
+                title: "Transcoding",
+                accessory: .disclosure
+            )
         case .howTo:
             cell.configure(
                 icon: "message.fill", color: UIColor(hex: 0x34C759),
@@ -157,6 +164,8 @@ final class SettingsViewController: UITableViewController {
         switch sections[indexPath.section].rows[indexPath.row] {
         case .account, .autoAdd:
             break
+        case .transcode:
+            navigationController?.pushViewController(TranscodeOptionsViewController(), animated: true)
         case .howTo:
             navigationController?.pushViewController(HowToViewController(), animated: true)
         case .privacy:

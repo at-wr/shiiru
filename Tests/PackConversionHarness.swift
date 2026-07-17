@@ -65,7 +65,9 @@ final class PackConversionHarness: XCTestCase {
             do {
                 let output: StickerConverter.Output
                 if file.hasSuffix(".webm") {
-                    output = try StickerConverter.convertWebm(at: "\(dir)/\(file)", fillCanvas: true)
+                    output = try StickerConverter.convertWebm(
+                        at: "\(dir)/\(file)", fillCanvas: true, profile: .emoji
+                    )
                 } else {
                     output = .png(try StickerConverter.convertStaticImage(
                         at: "\(dir)/\(file)", fillCanvas: true
@@ -108,6 +110,9 @@ final class PackConversionHarness: XCTestCase {
         let files = try FileManager.default.contentsOfDirectory(atPath: dir)
             .filter { $0.hasSuffix(".webm") || $0.hasSuffix(".webp") }
             .sorted()
+        // SHIIRU_PRESET selects the transcode preset (balanced/smooth/sharp).
+        let profile = (ProcessInfo.processInfo.environment["SHIIRU_PRESET"]
+            .flatMap(TranscodePreset.init(rawValue:)) ?? .balanced).profile
         var animated = 0, statics = 0, failures = 0
         let clock = ContinuousClock()
         var totalTime = Duration.zero
@@ -117,7 +122,7 @@ final class PackConversionHarness: XCTestCase {
                 var output: StickerConverter.Output?
                 let elapsed = try clock.measure {
                     if file.hasSuffix(".webm") {
-                        output = try StickerConverter.convertWebm(at: "\(dir)/\(file)")
+                        output = try StickerConverter.convertWebm(at: "\(dir)/\(file)", profile: profile)
                     } else {
                         output = .png(try StickerConverter.convertStaticImage(at: "\(dir)/\(file)"))
                     }

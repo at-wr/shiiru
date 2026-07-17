@@ -79,7 +79,11 @@ enum StickerConverter {
     }
 
     @MainActor
-    static func convertTGS(at path: String, fillCanvas fill: Bool = false) async throws -> Output {
+    static func convertTGS(
+        at path: String,
+        fillCanvas fill: Bool = false,
+        profile: TranscodeProfile = TranscodePreset.balanced.profile
+    ) async throws -> Output {
         let raw = try Data(contentsOf: URL(fileURLWithPath: path))
         let json = try gunzip(raw)
         let animation = try LottieAnimation.from(data: json)
@@ -89,7 +93,9 @@ enum StickerConverter {
         var planner = StickerEncodePlanner(
             sourceFPS: animation.framerate,
             budget: maxFileSize,
-            maxSide: playbackSideCap(frameCount: targetFrames)
+            maxSide: min(playbackSideCap(frameCount: targetFrames), profile.sideCap),
+            minSide: profile.minSide,
+            fpsFloor: profile.fpsFloor
         )
         var plan: (side: Int, fps: Double)? = (planner.side, planner.fps)
 
@@ -172,7 +178,11 @@ enum StickerConverter {
         return frames
     }
 
-    static func convertWebm(at path: String, fillCanvas fill: Bool = false) throws -> Output {
+    static func convertWebm(
+        at path: String,
+        fillCanvas fill: Bool = false,
+        profile: TranscodeProfile = TranscodePreset.balanced.profile
+    ) throws -> Output {
         guard let decoded = WebmStickerDecoder.decodeFrames(atPath: path, maxFrames: 90),
               !decoded.isEmpty
         else { throw ShiiruError.conversionFailed }
@@ -188,7 +198,9 @@ enum StickerConverter {
         var planner = StickerEncodePlanner(
             sourceFPS: sourceFPS,
             budget: maxFileSize,
-            maxSide: playbackSideCap(frameCount: targetFrames)
+            maxSide: min(playbackSideCap(frameCount: targetFrames), profile.sideCap),
+            minSide: profile.minSide,
+            fpsFloor: profile.fpsFloor
         )
         var plan: (side: Int, fps: Double)? = (planner.side, planner.fps)
 
@@ -219,14 +231,10 @@ enum StickerConverter {
         }
 
         // Emergency tiers: keeping the animation beats both display size
-        // and palette fidelity, so fps and colors give way first and the
-        // canvas erodes last (small-canvas stickers render tiny in the
-        // transcript). Overshooting attempts skip a rung so dense stickers
-        // don't crawl the whole ladder before finding their tier.
-        let lastStands: [(side: Int, fps: Double, colors: Int)] = [
-            (320, 12, 128), (320, 12, 96), (320, 12, 64),
-            (288, 10, 64), (256, 10, 64), (256, 8, 48), (224, 8, 48),
-        ]
+        // and palette fidelity; how the two trade off comes from the
+        // user's transcode preset. Overshooting attempts skip a rung so
+        // dense stickers don't crawl the whole ladder to find their tier.
+        let lastStands = profile.lastStands
         var standIndex = 0
         while standIndex < lastStands.count {
             let stand = lastStands[standIndex]

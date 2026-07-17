@@ -422,6 +422,9 @@ final class StickerSyncEngine: ObservableObject {
         // so the glyph doesn't float inside a mostly-empty sticker.
         var fill = false
         if case .stickerFullTypeCustomEmoji = sticker.fullType { fill = true }
+        // Emoji always favor fluid motion; stickers follow the user's
+        // transcode preset (Settings → Transcoding).
+        let profile = fill ? TranscodeProfile.emoji : TranscodePreset.current.profile
         switch sticker.format {
         case .stickerFormatWebp:
             let path = try await telegram.download(file: sticker.sticker)
@@ -430,12 +433,12 @@ final class StickerSyncEngine: ObservableObject {
             }.value)
         case .stickerFormatTgs:
             let path = try await telegram.download(file: sticker.sticker)
-            return try await StickerConverter.convertTGS(at: path, fillCanvas: fill)
+            return try await StickerConverter.convertTGS(at: path, fillCanvas: fill, profile: profile)
         case .stickerFormatWebm:
 
             let path = try await telegram.download(file: sticker.sticker)
-            if let animated = try? await Task.detached(priority: .userInitiated, operation: { [fill] in
-                try StickerConverter.convertWebm(at: path, fillCanvas: fill)
+            if let animated = try? await Task.detached(priority: .userInitiated, operation: { [fill, profile] in
+                try StickerConverter.convertWebm(at: path, fillCanvas: fill, profile: profile)
             }).value {
                 return animated
             }

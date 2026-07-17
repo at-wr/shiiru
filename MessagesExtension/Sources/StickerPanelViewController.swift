@@ -277,6 +277,11 @@ final class StickerPanelViewController: UIViewController {
         tabBar.reloadData()
         grid.reloadData()
         updateGridInsets()
+        // A scroll position carried over from the previous mode would leave
+        // the new list starting mid-content, its top rows hidden under the
+        // header bar.
+        grid.layoutIfNeeded()
+        grid.setContentOffset(CGPoint(x: 0, y: -grid.adjustedContentInset.top), animated: false)
         if !packs.isEmpty {
             tabBar.selectItem(at: IndexPath(item: 0, section: 0), animated: false, scrollPosition: [])
         }
