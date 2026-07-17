@@ -719,17 +719,47 @@ final class StickerCell: UICollectionViewCell {
         stickerView = view
     }
 
+    private var touchBegan: (time: CFTimeInterval, point: CGPoint)?
+
     @objc private func touchChanged(_ recognizer: UILongPressGestureRecognizer) {
         guard let stickerView else { return }
         switch recognizer.state {
         case .began:
+            touchBegan = (CACurrentMediaTime(), recognizer.location(in: self))
             preview.isHidden = true
             stickerView.alpha = 1
-        case .ended, .cancelled, .failed:
+        case .ended:
             preview.isHidden = false
             stickerView.alpha = Self.hiddenAlpha
+            playTapBounceIfQuick(endPoint: recognizer.location(in: self))
+        case .cancelled, .failed:
+            preview.isHidden = false
+            stickerView.alpha = Self.hiddenAlpha
+            touchBegan = nil
         default:
             break
+        }
+    }
+
+    /// The underlay owns tap-to-insert, which gives no visual feedback of
+    /// its own; quick taps replay the shrink-and-spring bounce the emoji
+    /// grid used to have. Peels and drags hold longer or move farther and
+    /// don't qualify (scroll pans arrive as .cancelled).
+    private func playTapBounceIfQuick(endPoint: CGPoint) {
+        defer { touchBegan = nil }
+        guard let touchBegan,
+              CACurrentMediaTime() - touchBegan.time < 0.3,
+              hypot(endPoint.x - touchBegan.point.x, endPoint.y - touchBegan.point.y) < 10
+        else { return }
+        UIView.animate(withDuration: 0.1, animations: {
+            self.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+        }) { _ in
+            UIView.animate(
+                withDuration: 0.3, delay: 0,
+                usingSpringWithDamping: 0.6, initialSpringVelocity: 0
+            ) {
+                self.transform = .identity
+            }
         }
     }
 
