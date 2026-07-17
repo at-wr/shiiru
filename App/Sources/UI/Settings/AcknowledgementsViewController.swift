@@ -126,6 +126,15 @@ final class TextPageViewController: UIViewController {
         textView.textColor = .label
         textView.isEditable = false
         textView.alwaysBounceVertical = true
+        // License texts come pre-formatted to their own column width;
+        // re-wrapping them to the screen mangles the layout. Keep the
+        // original line breaks and scroll horizontally instead.
+        textView.textContainer.widthTracksTextView = false
+        textView.textContainer.size = CGSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.showsHorizontalScrollIndicator = false
         textView.textContainerInset = UIEdgeInsets(top: 20, left: 16, bottom: 32, right: 16)
         textView.frame = view.bounds
         textView.autoresizingMask = [.flexibleWidth, .flexibleHeight]

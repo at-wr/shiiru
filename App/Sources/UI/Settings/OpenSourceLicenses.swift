@@ -51,7 +51,7 @@ enum OpenSourceLicenses {
     """
 
     static let telegramAssetsNote = """
-    Telegram iOS — Monkey Animations
+    Telegram iOS Monkey Animations
 
     The login and two-factor monkey animations are original assets from
     the official Telegram-iOS application, © Telegram Messenger LLP
