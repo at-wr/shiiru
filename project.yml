@@ -54,6 +54,12 @@ targets:
       - path: App/Sources
       - path: App/Resources
       - path: Shared
+      # Panel sources are compiled into the app as well so unit tests can
+      # exercise the extension UI in the simulator (the principal
+      # MSMessagesAppViewController stays extension-only).
+      - path: MessagesExtension/Sources
+        excludes:
+          - MessagesViewController.swift
       - path: Vendor/WebmParser
       - path: LICENSE
         buildPhase: resources
@@ -100,6 +106,10 @@ targets:
           - CFBundleURLName: dev.alany.shiiru
             CFBundleURLSchemes:
               - shiiru
+        # Continued-processing background task that keeps sticker syncs
+        # running after the user leaves the app (iOS 26+).
+        BGTaskSchedulerPermittedIdentifiers:
+          - dev.alany.shiiru.sync
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.alany.shiiru

@@ -19,6 +19,16 @@ final class MessagesViewController: MSMessagesAppViewController {
             guard let url = URL(string: "shiiru://") else { return }
             self?.extensionContext?.open(url)
         }
+
+        // Tapping a sticker stages it in the Messages input field — same
+        // behavior MSStickerView's tap gesture provided.
+        panel.onSelectSticker = { [weak self] sticker in
+            self?.activeConversation?.insert(sticker) { error in
+                if let error {
+                    NSLog("[Shiiru] Failed to insert sticker: \(error)")
+                }
+            }
+        }
     }
 
     override func willBecomeActive(with conversation: MSConversation) {

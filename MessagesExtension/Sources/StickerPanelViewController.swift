@@ -12,13 +12,23 @@ final class StickerPanelViewController: UIViewController {
     private var loadedManifestStamp: Date?
 
     var onOpenApp: (() -> Void)?
+    var onSelectSticker: ((MSSticker) -> Void)?
 
     private var programmaticScrollTarget: Int?
 
+    /// Only URLs and metadata are kept per sticker; decoding and MSSticker
+    /// creation happen lazily so opening the panel stays cheap no matter
+    /// how many packs are synced.
     private struct LoadedPack {
+        struct Item {
+            let url: URL
+            let description: String
+            let isAnimated: Bool
+        }
+
         let pack: StickerManifest.Pack
-        let stickers: [MSSticker]
-        let tabIcon: UIImage?
+        let items: [Item]
+        var iconURL: URL? { items.first?.url }
     }
 
     private var packs: [LoadedPack] = []
@@ -62,6 +72,7 @@ final class StickerPanelViewController: UIViewController {
         )
         view.dataSource = self
         view.delegate = self
+        view.prefetchDataSource = self
         view.preferSoftTopEdge()
         return view
     }()
@@ -89,7 +100,11 @@ final class StickerPanelViewController: UIViewController {
             self.applyMode()
         }
 
-        for subview in [settingsButton, tabBar, separator, grid, typeSwitcher] {
+        // The grid runs to the very bottom; the type switcher floats above
+        // it on a blurred capsule, exactly like Telegram's entity keyboard —
+        // stickers stay visible (and scroll) behind it instead of a dead
+        // opaque strip being reserved.
+        for subview in [grid, settingsButton, tabBar, separator, typeSwitcher] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
         }
@@ -115,13 +130,21 @@ final class StickerPanelViewController: UIViewController {
             grid.topAnchor.constraint(equalTo: separator.bottomAnchor),
             grid.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             grid.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            grid.bottomAnchor.constraint(equalTo: typeSwitcher.topAnchor, constant: -6),
+            grid.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
             typeSwitcher.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
             typeSwitcher.heightAnchor.constraint(equalToConstant: 36),
             typeSwitcher.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
             typeSwitcher.centerXAnchor.constraint(equalTo: view.centerXAnchor),
         ])
+    }
+
+    /// Keeps the last grid rows reachable above the floating switcher.
+    private func updateGridInsets() {
+        let bottom: CGFloat = typeSwitcher.isHidden ? 8 : 36 + 4 + 12
+        guard grid.contentInset.bottom != bottom else { return }
+        grid.contentInset.bottom = bottom
+        grid.verticalScrollIndicatorInsets.bottom = bottom
     }
 
     /// Watches manifest.json so a logout / re-sync in the main app updates
@@ -156,7 +179,7 @@ final class StickerPanelViewController: UIViewController {
         let savedOrder = UserDefaults(suiteName: AppGroup.identifier)?
             .stringArray(forKey: "packOrder") ?? []
         let orderIndex = Dictionary(uniqueKeysWithValues: savedOrder.enumerated().map { ($1, $0) })
-        packs = manifest.packs
+        let all: [LoadedPack] = manifest.packs
             .enumerated()
             .sorted { lhs, rhs in
                 let lhsOrder = orderIndex[lhs.element.id] ?? (1_000_000 + lhs.offset)
@@ -165,18 +188,17 @@ final class StickerPanelViewController: UIViewController {
             }
             .map(\.element)
             .compactMap { pack in
-                let stickers: [MSSticker] = pack.stickers.compactMap { sticker in
-                    let url = SharedStickerStore.shared.fileURL(pack: pack, sticker: sticker)
-                    let description = sticker.emoji.isEmpty ? pack.title : sticker.emoji
-                    return try? MSSticker(contentsOfFileURL: url, localizedDescription: description)
+                let items: [LoadedPack.Item] = pack.stickers.map { sticker in
+                    LoadedPack.Item(
+                        url: SharedStickerStore.shared.fileURL(pack: pack, sticker: sticker),
+                        description: sticker.emoji.isEmpty ? pack.title : sticker.emoji,
+                        isAnimated: sticker.isAnimated
+                    )
                 }
-                guard !stickers.isEmpty else { return nil }
-                let iconURL = SharedStickerStore.shared.fileURL(pack: pack, sticker: pack.stickers[0])
-                let icon = UIImage(contentsOfFile: iconURL.path)?.scaledDown(to: 88)
-                return LoadedPack(pack: pack, stickers: stickers, tabIcon: icon)
+                guard !items.isEmpty else { return nil }
+                return LoadedPack(pack: pack, items: items)
             }
 
-        let all = packs
         packsByMode = [
             Mode.emoji.rawValue: all.filter { $0.pack.packKind == "emoji" },
             Mode.stickers.rawValue: all.filter { $0.pack.packKind == "sticker" },
@@ -194,9 +216,9 @@ final class StickerPanelViewController: UIViewController {
         }
         typeSwitcher.setItems(available, selected: mode.rawValue)
         applyMode()
-        let isEmpty = packs.isEmpty
+        let isEmpty = all.isEmpty
         emptyState.isHidden = !isEmpty
-        tabBar.isHidden = isEmpty
+        tabBar.isHidden = isEmpty || mode == .gifs
         grid.isHidden = isEmpty
         if !isEmpty {
             tabBar.layoutIfNeeded()
@@ -242,9 +264,13 @@ final class StickerPanelViewController: UIViewController {
     private func applyMode() {
         packs = packsByMode[mode.rawValue] ?? []
         tabBar.isHidden = mode == .gifs
+        // Emoji cells insert via collection selection; sticker/GIF cells
+        // route touches to their MSStickerView underlay instead.
+        grid.allowsSelection = mode == .emoji
         grid.setCollectionViewLayout(makeGridLayout(), animated: false)
         tabBar.reloadData()
         grid.reloadData()
+        updateGridInsets()
         if !packs.isEmpty {
             tabBar.selectItem(at: IndexPath(item: 0, section: 0), animated: false, scrollPosition: [])
         }
@@ -256,6 +282,7 @@ final class StickerPanelViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateGridInsets()
 
         guard !tabHighlight.isHidden,
               tabHighlight.layer.animationKeys() == nil,
@@ -292,6 +319,16 @@ final class StickerPanelViewController: UIViewController {
             emptyState.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             emptyState.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
         ])
+    }
+
+    /// Approximate on-screen cell edge for the current mode, used to pick
+    /// the thumbnail decode resolution.
+    private var cellPointSide: CGFloat {
+        switch mode {
+        case .emoji: return 44
+        case .stickers: return 92
+        case .gifs: return 124
+        }
     }
 
     private func makeGridLayout() -> UICollectionViewLayout {
@@ -342,14 +379,15 @@ final class StickerPanelViewController: UIViewController {
     }
 }
 
-extension StickerPanelViewController: UICollectionViewDataSource, UICollectionViewDelegate {
+extension StickerPanelViewController: UICollectionViewDataSource, UICollectionViewDelegate,
+    UICollectionViewDataSourcePrefetching {
 
     func numberOfSections(in collectionView: UICollectionView) -> Int {
         collectionView === tabBar ? 1 : packs.count
     }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        collectionView === tabBar ? packs.count : packs[section].stickers.count
+        collectionView === tabBar ? packs.count : packs[section].items.count
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
@@ -357,14 +395,51 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
             let cell = collectionView.dequeueReusableCell(
                 withReuseIdentifier: PackTabCell.reuseIdentifier, for: indexPath
             ) as! PackTabCell
-            cell.configure(image: packs[indexPath.item].tabIcon)
+            cell.configure(url: packs[indexPath.item].iconURL)
             return cell
         }
         let cell = collectionView.dequeueReusableCell(
             withReuseIdentifier: StickerCell.reuseIdentifier, for: indexPath
         ) as! StickerCell
-        cell.configure(sticker: packs[indexPath.section].stickers[indexPath.item])
+        let item = packs[indexPath.section].items[indexPath.item]
+        cell.configure(
+            url: item.url,
+            description: item.description,
+            animated: item.isAnimated,
+            pixelSide: cellPointSide * UIScreen.main.scale,
+            fillsCell: mode == .gifs,
+            peelable: mode != .emoji
+        )
         return cell
+    }
+
+    func collectionView(_ collectionView: UICollectionView, prefetchItemsAt indexPaths: [IndexPath]) {
+        guard collectionView === grid else { return }
+        let pixelSide = cellPointSide * UIScreen.main.scale
+        for indexPath in indexPaths {
+            guard indexPath.section < packs.count,
+                  indexPath.item < packs[indexPath.section].items.count else { continue }
+            StickerPreview.thumbnail(
+                for: packs[indexPath.section].items[indexPath.item].url,
+                pixelSide: pixelSide
+            ) { _ in }
+        }
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        willDisplay cell: UICollectionViewCell,
+        forItemAt indexPath: IndexPath
+    ) {
+        (cell as? StickerCell)?.didBecomeVisible()
+    }
+
+    func collectionView(
+        _ collectionView: UICollectionView,
+        didEndDisplaying cell: UICollectionViewCell,
+        forItemAt indexPath: IndexPath
+    ) {
+        (cell as? StickerCell)?.didBecomeInvisible()
     }
 
     func collectionView(
@@ -382,7 +457,29 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard collectionView === tabBar else { return }
+        if collectionView === grid {
+            // Peelable modes disable selection: their MSStickerView underlay
+            // owns tap-to-insert natively. This path serves the emoji grid.
+            guard mode == .emoji else { return }
+            let item = packs[indexPath.section].items[indexPath.item]
+            guard let sticker = try? MSSticker(
+                contentsOfFileURL: item.url, localizedDescription: item.description
+            ) else { return }
+            if let cell = collectionView.cellForItem(at: indexPath) {
+                UIView.animate(withDuration: 0.1, animations: {
+                    cell.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
+                }) { _ in
+                    UIView.animate(
+                        withDuration: 0.3, delay: 0,
+                        usingSpringWithDamping: 0.6, initialSpringVelocity: 0
+                    ) {
+                        cell.transform = .identity
+                    }
+                }
+            }
+            onSelectSticker?(sticker)
+            return
+        }
 
         programmaticScrollTarget = indexPath.item
         setSelectedTab(indexPath.item, animated: true)
@@ -417,27 +514,98 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
 final class StickerCell: UICollectionViewCell {
     static let reuseIdentifier = "StickerCell"
 
+    private let preview = StickerPreviewView(frame: .zero)
+    /// Real MSStickerView underlay in peelable modes: it owns the native
+    /// tap-to-insert and peel-and-place gestures, but stays visually hidden
+    /// (alpha 0.02 keeps it hit-testable) so its buggy renderer — stale
+    /// name-keyed preview cache, full-res frame decoding — never draws the
+    /// grid. While a touch is down the underlay is revealed so the system's
+    /// drag lift preview shows the real artwork.
     private var stickerView: MSStickerView?
+    private lazy var touchWatcher: UILongPressGestureRecognizer = {
+        let recognizer = UILongPressGestureRecognizer(target: self, action: #selector(touchChanged(_:)))
+        recognizer.minimumPressDuration = 0.01
+        recognizer.allowableMovement = .greatestFiniteMagnitude
+        recognizer.cancelsTouchesInView = false
+        recognizer.delegate = self
+        return recognizer
+    }()
 
-    /// MSStickerView loads its image asynchronously and keeps the previous
-    /// sticker's rendering on reuse, which showed wrong artwork in fast
-    /// scrolls and after tab switches. A fresh view per configure guarantees
-    /// the displayed art always matches the attached sticker.
-    func configure(sticker: MSSticker) {
-        stickerView?.stopAnimating()
+    private static let hiddenAlpha: CGFloat = 0.02
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        preview.frame = contentView.bounds
+        preview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(preview)
+        contentView.addGestureRecognizer(touchWatcher)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(
+        url: URL,
+        description: String,
+        animated: Bool,
+        pixelSide: CGFloat,
+        fillsCell: Bool,
+        peelable: Bool
+    ) {
+        preview.contentModeFill = fillsCell
+        preview.configure(url: url, pixelSide: pixelSide, animated: animated)
+
         stickerView?.removeFromSuperview()
+        stickerView = nil
+        guard peelable,
+              let sticker = try? MSSticker(contentsOfFileURL: url, localizedDescription: description)
+        else { return }
         let view = MSStickerView(frame: contentView.bounds, sticker: sticker)
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        contentView.addSubview(view)
-        view.startAnimating()
+        view.alpha = Self.hiddenAlpha
+        contentView.insertSubview(view, belowSubview: preview)
         stickerView = view
+    }
+
+    @objc private func touchChanged(_ recognizer: UILongPressGestureRecognizer) {
+        guard let stickerView else { return }
+        switch recognizer.state {
+        case .began:
+            preview.isHidden = true
+            stickerView.alpha = 1
+        case .ended, .cancelled, .failed:
+            preview.isHidden = false
+            stickerView.alpha = Self.hiddenAlpha
+        default:
+            break
+        }
+    }
+
+    func didBecomeVisible() {
+        preview.resumeAnimationIfNeeded()
+    }
+
+    func didBecomeInvisible() {
+        preview.pauseAnimating()
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        stickerView?.stopAnimating()
+        preview.pauseAnimating()
+        preview.isHidden = false
         stickerView?.removeFromSuperview()
         stickerView = nil
+        transform = .identity
+    }
+}
+
+extension StickerCell: UIGestureRecognizerDelegate {
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        // The touch watcher only mirrors touch state; it must never block
+        // MSStickerView's tap/drag or the collection view's pan.
+        true
     }
 }
 
@@ -445,6 +613,7 @@ final class PackTabCell: UICollectionViewCell {
     static let reuseIdentifier = "PackTabCell"
 
     private let imageView = UIImageView()
+    private var representedURL: URL?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -458,8 +627,14 @@ final class PackTabCell: UICollectionViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(image: UIImage?) {
-        imageView.image = image
+    func configure(url: URL?) {
+        representedURL = url
+        imageView.image = nil
+        guard let url else { return }
+        StickerPreview.thumbnail(for: url, pixelSide: 88) { [weak self] image in
+            guard let self, self.representedURL == url else { return }
+            self.imageView.image = image
+        }
     }
 }
 
@@ -486,17 +661,6 @@ final class PackHeaderView: UICollectionReusableView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
-}
-
-private extension UIImage {
-    func scaledDown(to side: CGFloat) -> UIImage {
-        guard max(size.width, size.height) > side else { return self }
-        let ratio = side / max(size.width, size.height)
-        let newSize = CGSize(width: size.width * ratio, height: size.height * ratio)
-        return UIGraphicsImageRenderer(size: newSize).image { _ in
-            draw(in: CGRect(origin: .zero, size: newSize))
-        }
-    }
 }
 
 /// Telegram-style entity-type switcher: a blurred capsule bar with a
