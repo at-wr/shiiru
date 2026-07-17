@@ -218,6 +218,13 @@ final class StickerSyncEngine: ObservableObject {
     /// and decoding. Two lanes roughly halve pack sync time while keeping
     /// the transient frame-buffer memory bounded. Output preserves pack
     /// order; individual failures are skipped exactly like before.
+    ///
+    /// In the background iOS enforces a hard CPU budget — 50% of a core
+    /// averaged over 180 s — and terminates violators along with the
+    /// continued-processing task (observed in the field as an immediate
+    /// "task failed" pill ~100 s after backgrounding, at 89% average).
+    /// While backgrounded the pipeline therefore runs a single lane and
+    /// sleeps ~1.4× each item's duration between items, a ~40% duty cycle.
     private func convertItems<Item: Sendable>(
         _ items: [Item],
         syncToken: String,
@@ -235,16 +242,26 @@ final class StickerSyncEngine: ObservableObject {
         let totalWeight = max(weights.reduce(0, +), 1)
         var completedWeight = 0.0
 
-        try await withThrowingTaskGroup(of: (Int, StickerManifest.Sticker?).self) { group in
+        try await withThrowingTaskGroup(
+            of: (index: Int, sticker: StickerManifest.Sticker?, elapsed: Duration).self
+        ) { group in
             var next = 0
+            var inFlight = 0
+            let clock = ContinuousClock()
             // `Swift.Error` spelled explicitly: TDLibKit exports its own
             // `Error` type that would otherwise shadow it here.
-            func enqueue(_ group: inout ThrowingTaskGroup<(Int, StickerManifest.Sticker?), any Swift.Error>) {
+            func enqueue(
+                _ group: inout ThrowingTaskGroup<
+                    (index: Int, sticker: StickerManifest.Sticker?, elapsed: Duration), any Swift.Error
+                >
+            ) {
                 guard next < items.count else { return }
                 let index = next
                 let item = items[index]
                 next += 1
+                inFlight += 1
                 group.addTask {
+                    let start = clock.now
                     do {
                         let (output, emoji) = try await convert(item)
                         let fileName = String(
@@ -255,23 +272,37 @@ final class StickerSyncEngine: ObservableObject {
                         )
                         return (index, StickerManifest.Sticker(
                             fileName: fileName, emoji: emoji, isAnimated: output.isAnimated
-                        ))
+                        ), clock.now - start)
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
                         NSLog("[Shiiru] Skipping item \(index): \(error)")
-                        return (index, nil)
+                        return (index, nil, clock.now - start)
                     }
                 }
             }
+
+            func isBackgrounded() async -> Bool {
+                await MainActor.run { UIApplication.shared.applicationState == .background }
+            }
+
             enqueue(&group)
-            enqueue(&group)
-            while let (index, sticker) = try await group.next() {
+            if await !isBackgrounded() { enqueue(&group) }
+            while let (index, sticker, elapsed) = try await group.next() {
+                inFlight -= 1
                 if let sticker { results.append((index, sticker)) }
                 completed += 1
                 completedWeight += weights[index]
                 onProgress(completed, items.count, completedWeight / totalWeight)
-                enqueue(&group)
+                if await isBackgrounded() {
+                    // Duty-cycle pause; capped so the progress pill's
+                    // heartbeat window comfortably outlasts it.
+                    try? await Task.sleep(for: min(elapsed * 1.4, .seconds(45)))
+                    if inFlight == 0 { enqueue(&group) }
+                } else {
+                    enqueue(&group)
+                    if inFlight < 2 { enqueue(&group) }
+                }
             }
         }
         return results.sorted { $0.index < $1.index }.map(\.sticker)

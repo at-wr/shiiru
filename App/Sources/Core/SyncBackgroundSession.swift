@@ -137,7 +137,10 @@ final class SyncBackgroundSession {
     private func heartbeatTick() {
         guard #available(iOS 26.0, *), syncing,
               let task = continuedTask as? BGContinuedProcessingTask,
-              nudgeUnits < 20
+              // Budget sized for the background duty-cycle pauses between
+              // conversions (up to 45 s), which stretch the gap between
+              // real progress ticks.
+              nudgeUnits < 40
         else { return }
         nudgeUnits += 1
         task.progress.completedUnitCount = min(
