@@ -49,6 +49,15 @@ final class TelegramService: ObservableObject {
             handle(authorizationState: state.authorizationState)
         case .updateConnectionState(let update):
             isConnected = update.state == .connectionStateReady
+            // A getMe that raced the connection coming up leaves the
+            // Settings profile header on its "?" placeholder for the whole
+            // session (seen in field logs); retry once online.
+            if isConnected, authState == .ready, user == nil {
+                Task { await self.refreshUser() }
+            }
+        case .updateUser(let update) where update.user.id == user?.id:
+            // Name/avatar edits made in Telegram propagate live.
+            user = update.user
         default:
             break
         }
@@ -107,8 +116,22 @@ final class TelegramService: ObservableObject {
         }
     }
 
+    private var refreshingUser = false
+
     private func refreshUser() async {
-        user = try? await client.getMe()
+        guard !refreshingUser else { return }
+        refreshingUser = true
+        defer { refreshingUser = false }
+        // getMe normally answers from TDLib's local database, but a
+        // cold-start race can fail the first attempt — and a single
+        // swallowed failure used to leave `user` nil until relaunch.
+        for attempt in 0..<3 {
+            if let me = try? await client.getMe() {
+                user = me
+                break
+            }
+            try? await Task.sleep(nanoseconds: UInt64(1 << attempt) * 1_000_000_000)
+        }
         _ = await avatarImage()
     }
 
