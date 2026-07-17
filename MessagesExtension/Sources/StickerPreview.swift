@@ -166,14 +166,29 @@ final class StickerAnimator {
 
     private var displayLink: CADisplayLink?
     private let views = NSHashTable<StickerPreviewView>.weakObjects()
+    /// Visible previews that asked for a slot while all were taken. When a
+    /// slot frees they are revived in turn — without this, a cell denied
+    /// once would stay on its static frame until the next scroll recycled
+    /// it, even with the animator sitting mostly idle.
+    private let waiting = NSHashTable<StickerPreviewView>.weakObjects()
 
     /// Playback capacity guard: beyond this many simultaneously animating
     /// previews (dense emoji grids), extra cells stay on their static frame.
     static let maxConcurrent = 28
 
-    var canAnimateMore: Bool { views.count < Self.maxConcurrent }
+    /// Claims an animation slot, or queues the view for revival when one
+    /// frees up.
+    func requestSlot(_ view: StickerPreviewView) -> Bool {
+        if views.count < Self.maxConcurrent {
+            waiting.remove(view)
+            return true
+        }
+        waiting.add(view)
+        return false
+    }
 
     func register(_ view: StickerPreviewView) {
+        waiting.remove(view)
         views.add(view)
         guard displayLink == nil else { return }
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
@@ -183,10 +198,17 @@ final class StickerAnimator {
     }
 
     func unregister(_ view: StickerPreviewView) {
+        let held = views.contains(view)
         views.remove(view)
+        waiting.remove(view)
         if views.count == 0 {
             displayLink?.invalidate()
             displayLink = nil
+        }
+        // One slot freed → revive one waiter.
+        if held, let next = waiting.allObjects.first {
+            waiting.remove(next)
+            next.resumeAnimationIfNeeded()
         }
     }
 
@@ -208,6 +230,12 @@ final class StickerPreviewView: UIView {
     private var displayedFrame = -1
     private var wantsAnimation = false
     private var loadingAnimation = false
+    /// True between resume and pause: the cell is on screen and should
+    /// tick. Async decode completions must not register a preview whose
+    /// cell went back to the reuse pool — pooled cells keep their window,
+    /// so a window check alone lets off-screen phantoms hoard animator
+    /// slots and freshly shown stickers then sit on their static frame.
+    private var wantsTicks = false
 
     var contentModeFill = false {
         didSet { layer.contentsGravity = contentModeFill ? .resizeAspectFill : .resizeAspect }
@@ -243,19 +271,21 @@ final class StickerPreviewView: UIView {
     /// Called when the cell becomes visible; loads frames lazily.
     func resumeAnimationIfNeeded() {
         guard wantsAnimation, window != nil else { return }
+        wantsTicks = true
         guard animation == nil else {
             StickerAnimator.shared.register(self)
             return
         }
-        guard !loadingAnimation, StickerAnimator.shared.canAnimateMore, let url else { return }
+        guard !loadingAnimation, let url,
+              StickerAnimator.shared.requestSlot(self) else { return }
         loadingAnimation = true
         StickerPreview.animation(for: url) { [weak self] animation in
             guard let self else { return }
             self.loadingAnimation = false
-            guard self.url == url, self.wantsAnimation, let animation else { return }
+            guard self.url == url, self.wantsTicks, self.window != nil, let animation else { return }
             self.animation = animation
             if self.startTime == 0 { self.startTime = CACurrentMediaTime() }
-            guard self.window != nil, StickerAnimator.shared.canAnimateMore else { return }
+            guard StickerAnimator.shared.requestSlot(self) else { return }
             StickerAnimator.shared.register(self)
         }
     }
@@ -263,12 +293,14 @@ final class StickerPreviewView: UIView {
     /// Off-screen: stop ticking and drop the frame buffer (the shared cache
     /// keeps it warm for a quick resume), but stay resumable.
     func pauseAnimating() {
+        wantsTicks = false
         StickerAnimator.shared.unregister(self)
         animation = nil
     }
 
     /// Full reset ahead of reconfiguring with a different sticker.
     func stopAnimating() {
+        wantsTicks = false
         StickerAnimator.shared.unregister(self)
         animation = nil
         wantsAnimation = false
@@ -287,6 +319,7 @@ final class StickerPreviewView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil {
+            wantsTicks = false
             StickerAnimator.shared.unregister(self)
         } else {
             resumeAnimationIfNeeded()
