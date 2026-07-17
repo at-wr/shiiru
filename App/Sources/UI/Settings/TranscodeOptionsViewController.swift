@@ -47,17 +47,16 @@ final class TranscodeOptionsViewController: UITableViewController {
             return """
             iMessage caps every sticker at 500 KB. A busy video sticker \
             can't keep full display size, fluid motion, and rich color all \
-            at once inside that budget — this picks what gives way first. \
-            Animated emoji always prioritize smooth motion.
+            at once inside that budget.
             """
         case .customKnobs:
             return """
-            Floors are best-effort: when even the floors don't fit, the \
+            Floors are best-effort. When even the floors don't fit, the \
             frame rate dips slightly and the canvas shrinks step by step \
             so the sticker stays animated.
             """
         case .actions:
-            return "Already-synced packs keep their current conversion until re-converted."
+            return "Already-synced packs keep their current version until reprocessed."
         }
     }
 
@@ -107,8 +106,8 @@ final class TranscodeOptionsViewController: UITableViewController {
 
         case .actions:
             let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-            cell.textLabel?.text = "Re-Convert Synced Packs Now"
-            cell.textLabel?.textColor = view.tintColor
+            cell.textLabel?.text = "Reprocess Synced Packs Now"
+            cell.textLabel?.textColor = .systemRed
             return cell
         }
     }
@@ -157,12 +156,12 @@ final class TranscodeOptionsViewController: UITableViewController {
               !SharedStickerStore.shared.syncedPackIDs().isEmpty
         else { return }
         let alert = UIAlertController(
-            title: "Re-Convert Synced Packs?",
+            title: "Reprocess Synced Packs?",
             message: "Applies the current setting to everything already in iMessage. "
                 + "This downloads and converts your packs again, which can take a while.",
             preferredStyle: .alert
         )
-        alert.addAction(UIAlertAction(title: "Re-Convert All", style: .default) { _ in
+        alert.addAction(UIAlertAction(title: "Reprocess All", style: .default) { _ in
             Self.reconvertAllSyncedPacks()
             Haptics.success()
         })
