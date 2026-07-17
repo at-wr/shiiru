@@ -72,26 +72,27 @@ enum TranscodePreset: String, CaseIterable {
     static let colorFloorChoices = [32, 48, 64, 96, 128]
 
     static var customCanvasFloor: Int {
-        get { defaultedInt("customCanvasFloor", fallback: 320, allowed: canvasFloorChoices) }
+        get { defaulted("customCanvasFloor", fallback: 320, allowed: canvasFloorChoices) }
         set { UserDefaults.standard.set(newValue, forKey: "customCanvasFloor") }
     }
 
     static var customFPSFloor: Double {
-        get {
-            let stored = UserDefaults.standard.double(forKey: "customFPSFloor")
-            return fpsFloorChoices.contains(stored) ? stored : 12
-        }
+        get { defaulted("customFPSFloor", fallback: 12, allowed: fpsFloorChoices) }
         set { UserDefaults.standard.set(newValue, forKey: "customFPSFloor") }
     }
 
     static var customColorFloor: Int {
-        get { defaultedInt("customColorFloor", fallback: 48, allowed: colorFloorChoices) }
+        get { defaulted("customColorFloor", fallback: 48, allowed: colorFloorChoices) }
         set { UserDefaults.standard.set(newValue, forKey: "customColorFloor") }
     }
 
-    private static func defaultedInt(_ key: String, fallback: Int, allowed: [Int]) -> Int {
-        let stored = UserDefaults.standard.integer(forKey: key)
-        return allowed.contains(stored) ? stored : fallback
+    private static func defaulted<Value: Equatable>(
+        _ key: String, fallback: Value, allowed: [Value]
+    ) -> Value {
+        guard let stored = UserDefaults.standard.object(forKey: key) as? Value,
+              allowed.contains(stored)
+        else { return fallback }
+        return stored
     }
 
     // MARK: - Encoder parameters
@@ -103,7 +104,6 @@ enum TranscodePreset: String, CaseIterable {
             // to a static frame while any animation still fits.
             return TranscodeProfile(
                 minSide: 320,
-                sideCap: 512,
                 lastStands: [
                     (320, 12, 128), (320, 12, 96), (320, 12, 64),
                     (320, 10, 48), (288, 10, 48), (288, 8, 48),
@@ -113,7 +113,7 @@ enum TranscodePreset: String, CaseIterable {
         case .smoothMotion:
             return TranscodeProfile(
                 minSide: 192,
-                sideCap: 512,
+                fpsFloor: 16,
                 lastStands: [
                     (256, 16, 96), (224, 16, 64), (192, 16, 64),
                     (192, 12, 64), (160, 12, 64), (160, 10, 48),
@@ -124,7 +124,6 @@ enum TranscodePreset: String, CaseIterable {
             // rungs erode the canvas after size-first attempts run dry.
             return TranscodeProfile(
                 minSide: 384,
-                sideCap: 512,
                 lastStands: [
                     (448, 10, 64), (448, 8, 48), (416, 8, 48), (384, 8, 48),
                     (352, 8, 48), (320, 8, 48), (288, 8, 48), (256, 8, 48), (224, 8, 48),
@@ -146,7 +145,7 @@ struct TranscodeProfile {
     /// Smallest canvas the planner may shrink to before sacrificing fps.
     let minSide: Int
     /// Hard canvas ceiling (below the global 512 when upscaling is futile).
-    let sideCap: Int
+    var sideCap: Int = 512
     /// Lowest frame rate the planner may resample down to. The emergency
     /// ladder is allowed to dip below it as a final anti-static resort.
     var fpsFloor: Double = 12
@@ -184,7 +183,6 @@ struct TranscodeProfile {
         if rungs.isEmpty { rungs = [(canvasFloor, fpsFloor, colorFloor)] }
         return TranscodeProfile(
             minSide: canvasFloor,
-            sideCap: 512,
             fpsFloor: fpsFloor,
             lastStands: rungs
         )

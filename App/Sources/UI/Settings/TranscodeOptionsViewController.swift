@@ -157,8 +157,9 @@ final class TranscodeOptionsViewController: UITableViewController {
         else { return }
         let alert = UIAlertController(
             title: "Reprocess Synced Packs?",
-            message: "Applies the current setting to everything already in iMessage. "
-                + "This downloads and converts your packs again, which can take a while.",
+            message: "Applies the current setting to your synced sticker packs. "
+                + "This downloads and converts them again, which can take a while. "
+                + "Emoji and GIFs aren't affected by the preset and are left as they are.",
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "Reprocess All", style: .default) { _ in
@@ -169,17 +170,17 @@ final class TranscodeOptionsViewController: UITableViewController {
         present(alert, animated: true)
     }
 
+    /// Only sticker packs follow the transcode preset — custom emoji use
+    /// the fixed emoji profile and GIFs a dedicated video ladder — so only
+    /// sticker packs are re-enqueued; anything else would re-download and
+    /// re-convert to identical output.
     private static func reconvertAllSyncedPacks() {
         Task { @MainActor in
             let synced = SharedStickerStore.shared.syncedPackIDs()
             let engine = StickerSyncEngine.shared
             let installed = (try? await TelegramService.shared.installedStickerSets()) ?? []
-            let emoji = (try? await TelegramService.shared.customEmojiSets()) ?? []
-            for info in installed + emoji where synced.contains(String(info.id.rawValue)) {
+            for info in installed where synced.contains(String(info.id.rawValue)) {
                 engine.setSyncEnabled(true, for: info)
-            }
-            if synced.contains(StickerSyncEngine.gifsPackID) {
-                engine.setGifSyncEnabled(true)
             }
         }
     }
