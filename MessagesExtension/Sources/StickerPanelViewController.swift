@@ -12,7 +12,6 @@ final class StickerPanelViewController: UIViewController {
     private var loadedManifestStamp: Date?
 
     var onOpenApp: (() -> Void)?
-    var onSelectSticker: ((MSSticker) -> Void)?
 
     private var programmaticScrollTarget: Int?
 
@@ -365,9 +364,9 @@ final class StickerPanelViewController: UIViewController {
     private func applyMode() {
         packs = packsByMode[mode.rawValue] ?? []
         tabBar.isHidden = mode == .gifs
-        // Emoji cells insert via collection selection; sticker/GIF cells
-        // route touches to their MSStickerView underlay instead.
-        grid.allowsSelection = mode == .emoji
+        // Every mode routes touches to the cells' MSStickerView underlay —
+        // native tap-to-insert and peel-and-place, emoji included.
+        grid.allowsSelection = false
         grid.setCollectionViewLayout(makeGridLayout(), animated: false)
         tabBar.reloadData()
         grid.reloadData()
@@ -525,7 +524,7 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
             animated: item.isAnimated,
             pixelSide: cellPointSide * UIScreen.main.scale,
             fillsCell: mode == .gifs,
-            peelable: mode != .emoji
+            peelable: true
         )
         return cell
     }
@@ -600,29 +599,7 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        if collectionView === grid {
-            // Peelable modes disable selection: their MSStickerView underlay
-            // owns tap-to-insert natively. This path serves the emoji grid.
-            guard mode == .emoji else { return }
-            let item = packs[indexPath.section].items[indexPath.item]
-            guard let sticker = try? MSSticker(
-                contentsOfFileURL: item.url, localizedDescription: item.description
-            ) else { return }
-            if let cell = collectionView.cellForItem(at: indexPath) {
-                UIView.animate(withDuration: 0.1, animations: {
-                    cell.transform = CGAffineTransform(scaleX: 0.85, y: 0.85)
-                }) { _ in
-                    UIView.animate(
-                        withDuration: 0.3, delay: 0,
-                        usingSpringWithDamping: 0.6, initialSpringVelocity: 0
-                    ) {
-                        cell.transform = .identity
-                    }
-                }
-            }
-            onSelectSticker?(sticker)
-            return
-        }
+        guard collectionView === tabBar else { return }
 
         programmaticScrollTarget = indexPath.item
         setSelectedTab(indexPath.item, animated: true)
