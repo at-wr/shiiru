@@ -228,6 +228,12 @@ final class StickerPanelViewController: UIViewController {
         }
     }
 
+    /// The highlight pill hugs the thumbnail (3 pt of air instead of the
+    /// full cell) so the selection doesn't look like a loose box.
+    private func highlightFrame(for attributes: UICollectionViewLayoutAttributes) -> CGRect {
+        attributes.frame.insetBy(dx: 2, dy: 2)
+    }
+
     private func setSelectedTab(_ index: Int, animated: Bool) {
         guard index < packs.count,
             let attributes = tabBar.layoutAttributesForItem(at: IndexPath(item: index, section: 0))
@@ -236,7 +242,7 @@ final class StickerPanelViewController: UIViewController {
             return
         }
         selectedTabIndex = index
-        let frame = attributes.frame
+        let frame = highlightFrame(for: attributes)
         let apply = { self.tabHighlight.frame = frame }
 
         if tabHighlight.isHidden || !animated {
@@ -254,7 +260,7 @@ final class StickerPanelViewController: UIViewController {
         }
 
         let itemSize: CGFloat = 44, itemSpacing: CGFloat = 6, sideInset: CGFloat = 10
-        let reveal = frame.insetBy(dx: -(sideInset + (itemSize + itemSpacing) * 2), dy: 0)
+        let reveal = attributes.frame.insetBy(dx: -(sideInset + (itemSize + itemSpacing) * 2), dy: 0)
         tabBar.scrollRectToVisible(reveal, animated: animated)
     }
 
@@ -289,9 +295,9 @@ final class StickerPanelViewController: UIViewController {
               let attributes = tabBar.layoutAttributesForItem(
                   at: IndexPath(item: selectedTabIndex, section: 0)
               ),
-              tabHighlight.frame != attributes.frame
+              tabHighlight.frame != highlightFrame(for: attributes)
         else { return }
-        tabHighlight.frame = attributes.frame
+        tabHighlight.frame = highlightFrame(for: attributes)
     }
 
     private func buildEmptyState() {
@@ -620,7 +626,7 @@ final class PackTabCell: UICollectionViewCell {
         contentView.layer.cornerRadius = 10
         contentView.layer.cornerCurve = .continuous
         imageView.contentMode = .scaleAspectFit
-        imageView.frame = contentView.bounds.insetBy(dx: 6, dy: 6)
+        imageView.frame = contentView.bounds.insetBy(dx: 5, dy: 5)
         imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         contentView.addSubview(imageView)
     }
