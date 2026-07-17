@@ -47,6 +47,55 @@ final class PackConversionHarness: XCTestCase {
         }
     }
 
+    /// Converts a directory of custom-emoji sources (webp/webm) with canvas
+    /// filling on, verifying padding is cropped and output fills the canvas.
+    func testConvertEmojiDirectory() throws {
+        guard let dir = ProcessInfo.processInfo.environment["SHIIRU_EMOJI_DIR"] else {
+            throw XCTSkip("set SHIIRU_EMOJI_DIR to run the emoji harness")
+        }
+        let auditDir = ProcessInfo.processInfo.environment["SHIIRU_AUDIT_DIR"]
+        if let auditDir {
+            try? FileManager.default.createDirectory(atPath: auditDir, withIntermediateDirectories: true)
+        }
+        let files = try FileManager.default.contentsOfDirectory(atPath: dir)
+            .filter { $0.hasSuffix(".webm") || $0.hasSuffix(".webp") }
+            .sorted()
+        var failures = 0
+        for file in files {
+            do {
+                let output: StickerConverter.Output
+                if file.hasSuffix(".webm") {
+                    output = try StickerConverter.convertWebm(at: "\(dir)/\(file)", fillCanvas: true)
+                } else {
+                    output = .png(try StickerConverter.convertStaticImage(
+                        at: "\(dir)/\(file)", fillCanvas: true
+                    ))
+                }
+                let source = try XCTUnwrap(CGImageSourceCreateWithData(output.data as CFData, nil))
+                let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+                let frames = CGImageSourceGetCount(source)
+                XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
+                // Static emoji upscale to the full canvas; animated emoji
+                // trade resolution for the 500 KB budget, but never below
+                // the encoder's floor.
+                XCTAssertGreaterThanOrEqual(
+                    max(image.width, image.height), output.isAnimated ? 160 : 512,
+                    "\(file): emoji should fill a high-res canvas"
+                )
+                print("EMOJI \(file): \(output.isAnimated ? "APNG" : "STATIC") "
+                    + "\(image.width)x\(image.height) \(frames)f \(output.data.count / 1024)KB")
+                if let auditDir {
+                    try? output.data.write(to: URL(fileURLWithPath: "\(auditDir)/emoji-\(file).png"))
+                }
+            } catch {
+                failures += 1
+                print("EMOJI \(file): FAILED \(error)")
+            }
+        }
+        print("EMOJI summary: \(failures) failed of \(files.count)")
+        XCTAssertEqual(failures, 0)
+    }
+
     func testConvertLocalPack() throws {
         guard let dir = ProcessInfo.processInfo.environment["SHIIRU_WEBM_DIR"] else {
             throw XCTSkip("set SHIIRU_WEBM_DIR to run the pack harness")
@@ -57,29 +106,43 @@ final class PackConversionHarness: XCTestCase {
         }
 
         let files = try FileManager.default.contentsOfDirectory(atPath: dir)
-            .filter { $0.hasSuffix(".webm") }
+            .filter { $0.hasSuffix(".webm") || $0.hasSuffix(".webp") }
             .sorted()
         var animated = 0, statics = 0, failures = 0
+        let clock = ContinuousClock()
+        var totalTime = Duration.zero
 
         for file in files {
             do {
-                let output = try StickerConverter.convertWebm(at: "\(dir)/\(file)")
-                let source = try XCTUnwrap(CGImageSourceCreateWithData(output.data as CFData, nil))
+                var output: StickerConverter.Output?
+                let elapsed = try clock.measure {
+                    if file.hasSuffix(".webm") {
+                        output = try StickerConverter.convertWebm(at: "\(dir)/\(file)")
+                    } else {
+                        output = .png(try StickerConverter.convertStaticImage(at: "\(dir)/\(file)"))
+                    }
+                }
+                totalTime += elapsed
+                let data = try XCTUnwrap(output).data
+                let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
                 let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
                 let frames = CGImageSourceGetCount(source)
-                XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
-                if output.isAnimated { animated += 1 } else { statics += 1 }
-                print("HARNESS \(file): \(output.isAnimated ? "APNG" : "STATIC") "
-                    + "\(image.width)x\(image.height) \(frames)f \(output.data.count / 1024)KB")
+                XCTAssertLessThanOrEqual(data.count, StickerConverter.maxFileSize)
+                if output?.isAnimated == true { animated += 1 } else { statics += 1 }
+                let seconds = Double(elapsed.components.seconds)
+                    + Double(elapsed.components.attoseconds) / 1e18
+                print("HARNESS \(file): \(output?.isAnimated == true ? "APNG" : "STATIC") "
+                    + "\(image.width)x\(image.height) \(frames)f \(data.count / 1024)KB "
+                    + String(format: "%.1fs", seconds))
                 if let auditDir {
-                    try? output.data.write(to: URL(fileURLWithPath: "\(auditDir)/\(file).png"))
+                    try? data.write(to: URL(fileURLWithPath: "\(auditDir)/\(file).png"))
                 }
             } catch {
                 failures += 1
                 print("HARNESS \(file): FAILED \(error)")
             }
         }
-        print("HARNESS summary: \(animated) animated, \(statics) static, \(failures) failed of \(files.count)")
+        print("HARNESS summary: \(animated) animated, \(statics) static, \(failures) failed of \(files.count), total \(totalTime)")
         XCTAssertEqual(failures, 0)
     }
 }

@@ -11,9 +11,13 @@ enum StickerConverter {
 
     static let maxFileSize = 500_000
 
-    static let pipelineVersion = 9
+    static let pipelineVersion = 10
 
-    static let playbackPixelBudget = 8_000_000
+    /// Total decoded pixels across all frames the transcript renderer may
+    /// hold at once. Sized so that even 90-frame stickers keep a canvas at
+    /// or above the display floor (Messages renders animated stickers
+    /// proportionally to their pixel size — small canvases display small).
+    static let playbackPixelBudget = 12_000_000
 
     static func playbackSideCap(frameCount: Int) -> Int {
         min(512, Int(Double(playbackPixelBudget / max(frameCount, 1)).squareRoot()))
@@ -47,8 +51,16 @@ enum StickerConverter {
     static func convertStaticImage(at path: String, fillCanvas fill: Bool = false) throws -> Data {
         let url = URL(fileURLWithPath: path)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              var image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { throw ShiiruError.conversionFailed }
+
+        if fill {
+            // Custom emoji: crop the padding, then upscale to the full
+            // canvas — Messages renders stickers at a fixed transcript
+            // size, so small canvases only add blur, never smallness.
+            image = fillCanvas([image], side: 512).first ?? image
+            image = scale(image, toFit: 512, exact: true) ?? image
+        }
 
         if let scaled = scale(image, toFit: 512),
            let lossless = encodePNG(frames: [(scaled, 0)], loopCount: nil),
@@ -97,14 +109,20 @@ enum StickerConverter {
                 count: frameCount
             )
             guard !frames.isEmpty else { break }
-            let cgFrames = frames.compactMap { $0.cgImage }
-            firstFrame = firstFrame ?? cgFrames.first
+            var cgFrames = frames.compactMap { $0.cgImage }
+            if fill {
+                // Custom emoji: crop away the shared transparent padding so
+                // the glyph fills the sticker instead of floating in it.
+                cgFrames = fillCanvas(cgFrames, side: attempt.side)
+            }
+            guard let canvas = cgFrames.first else { break }
+            firstFrame = firstFrame ?? canvas
 
             let data = await Task.detached(priority: .userInitiated, operation: {
                 APNGEncoder.encode(
                     frames: cgFrames.map { APNGEncoder.Frame(image: $0, delay: delay) },
-                    width: width,
-                    height: height,
+                    width: canvas.width,
+                    height: canvas.height,
                     byteBudget: maxFileSize * 5 / 2
                 )
             }).value
@@ -180,8 +198,10 @@ enum StickerConverter {
             let count = min(decoded.count, max(2, Int((duration * attempt.fps).rounded())))
             let picked = (0..<count).map { decoded[$0 * decoded.count / count] }
             let delay = duration / Double(picked.count)
-            let frames: [APNGEncoder.Frame] = picked.compactMap { frame in
-                guard let scaled = scale(frame.image, toFit: attempt.side, exact: true) else { return nil }
+            var images = picked.map(\.image)
+            if fill { images = fillCanvas(images, side: attempt.side) }
+            let frames: [APNGEncoder.Frame] = images.compactMap { image in
+                guard let scaled = scale(image, toFit: attempt.side, exact: true) else { return nil }
                 return APNGEncoder.Frame(image: scaled, delay: delay)
             }
             guard let first = frames.first else { break }
@@ -198,27 +218,40 @@ enum StickerConverter {
             plan = planner.next(measuredSize: data?.count)
         }
 
+        // Emergency tiers: keeping the animation beats both display size
+        // and palette fidelity, so fps and colors give way first and the
+        // canvas erodes last (small-canvas stickers render tiny in the
+        // transcript). Overshooting attempts skip a rung so dense stickers
+        // don't crawl the whole ladder before finding their tier.
         let lastStands: [(side: Int, fps: Double, colors: Int)] = [
-            (192, 12, 128), (160, 16, 96), (160, 12, 128), (160, 12, 96), (160, 12, 64),
+            (320, 12, 128), (320, 12, 96), (320, 12, 64),
+            (288, 10, 64), (256, 10, 64), (256, 8, 48), (224, 8, 48),
         ]
-        for stand in lastStands {
+        var standIndex = 0
+        while standIndex < lastStands.count {
+            let stand = lastStands[standIndex]
             let count = min(decoded.count, max(2, Int((duration * stand.fps).rounded())))
             let picked = (0..<count).map { decoded[$0 * decoded.count / count] }
             let delay = duration / Double(picked.count)
-            let frames: [APNGEncoder.Frame] = picked.compactMap { frame in
-                guard let scaled = scale(frame.image, toFit: stand.side, exact: true) else { return nil }
+            var images = picked.map(\.image)
+            if fill { images = fillCanvas(images, side: stand.side) }
+            let frames: [APNGEncoder.Frame] = images.compactMap { image in
+                guard let scaled = scale(image, toFit: stand.side, exact: true) else { return nil }
                 return APNGEncoder.Frame(image: scaled, delay: delay)
             }
-            if let first = frames.first, frames.count > 1,
-               let data = APNGEncoder.encode(
-                   frames: frames,
-                   width: first.image.width,
-                   height: first.image.height,
-                   byteBudget: maxFileSize,
-                   maxColors: stand.colors
-               ), data.count <= maxFileSize {
+            guard let first = frames.first, frames.count > 1 else { break }
+            let data = APNGEncoder.encode(
+                frames: frames,
+                width: first.image.width,
+                height: first.image.height,
+                byteBudget: maxFileSize * 2,
+                maxColors: stand.colors
+            )
+            if let data, data.count <= maxFileSize {
                 return .apng(data)
             }
+            let overshoot = data.map { Double($0.count) / Double(maxFileSize) } ?? 3
+            standIndex += overshoot > 2 ? 2 : 1
         }
 
         if let first = firstFrame,
@@ -347,7 +380,7 @@ enum StickerConverter {
     private static func encodeFrameLadder(_ source: [(CGImage, Double)]) throws -> Output {
         guard !source.isEmpty else { throw ShiiruError.conversionFailed }
         let attempts: [(side: Int, maxFrames: Int)] = [
-            (408, 60), (352, 45), (320, 36), (288, 27), (256, 20)
+            (448, 60), (408, 45), (384, 36), (352, 27), (320, 20), (320, 14)
         ]
         let totalDuration = source.reduce(0) { $0 + $1.1 }
         var firstFrame: CGImage?

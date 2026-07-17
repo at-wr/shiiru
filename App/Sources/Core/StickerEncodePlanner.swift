@@ -4,7 +4,11 @@ struct StickerEncodePlanner {
 
     static let maxSide = 512
 
-    static let minSide = 192
+    /// Messages renders animated stickers proportionally to their pixel
+    /// dimensions (~side/3 pt in the transcript). Below this floor they
+    /// display noticeably smaller than on Telegram, so byte pressure is
+    /// relieved through fps and palette before the canvas ever shrinks.
+    static let minSide = 320
 
     private let budget: Double
     private let sideCap: Int
