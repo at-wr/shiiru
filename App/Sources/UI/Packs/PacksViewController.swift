@@ -208,11 +208,11 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         guard !staleIDs.isEmpty else { return }
         for info in sets + emojiSets where staleIDs.contains(String(info.id.rawValue)) {
             if sync.phase(for: info.id) == .synced {
-                sync.setSyncEnabled(true, for: info)
+                sync.setSyncEnabled(true, for: info, userInitiated: false)
             }
         }
         if staleIDs.contains(StickerSyncEngine.gifsPackID) {
-            sync.setGifSyncEnabled(true)
+            sync.setGifSyncEnabled(true, userInitiated: false)
         }
     }
 

@@ -27,7 +27,26 @@ final class StickerSyncEngine: ObservableObject {
     private let store = SharedStickerStore.shared
     private var tasks: [String: Task<Void, Never>] = [:]
 
-    private var syncChain: Task<Void, Never>?
+    /// One queued pack sync. User-initiated packs jump ahead of the
+    /// automatic backlog (stale re-conversions, drift repairs) so the pack
+    /// the user just toggled is what runs — and what the background pill
+    /// tracks — instead of waiting behind a migration storm.
+    private struct PendingSync {
+        let key: String
+        let userInitiated: Bool
+        let run: () async -> Void
+    }
+
+    private var pendingSyncs: [PendingSync] = []
+    private var runningKey: String?
+    private var runner: Task<Void, Never>?
+
+    private var queuedKeys: Set<String> {
+        var keys = Set(pendingSyncs.map(\.key))
+        if let runningKey { keys.insert(runningKey) }
+        return keys
+    }
+
     private let thumbnailCache = NSCache<NSString, UIImage>()
     private let animationCache = NSCache<NSString, LottieAnimation>()
 
@@ -45,24 +64,21 @@ final class StickerSyncEngine: ObservableObject {
         phases[String(setID.rawValue)] ?? .idle
     }
 
-    func setSyncEnabled(_ enabled: Bool, for info: StickerSetInfo) {
+    /// `userInitiated` marks syncs the user asked for directly (toggles,
+    /// Sync All) — only those may put up the system's background progress
+    /// pill. Automatic work (stale re-conversion, drift checks) runs
+    /// foreground-only and resumes on the next open or nightly window.
+    func setSyncEnabled(_ enabled: Bool, for info: StickerSetInfo, userInitiated: Bool = true) {
         let key = String(info.id.rawValue)
         if enabled {
-            guard tasks[key] == nil else { return }
+            guard !queuedKeys.contains(key) else { return }
             phases[key] = .syncing(progress: 0)
-            SyncBackgroundSession.shared.packQueued()
-            let predecessor = syncChain
-            let task = Task { [weak self] in
-                _ = await predecessor?.value
-                if !Task.isCancelled {
-                    await self?.sync(info: info, key: key)
-                }
-                self?.tasks[key] = nil
-                self?.noteSyncTaskDrained()
-            }
-            tasks[key] = task
-            syncChain = task
+            SyncBackgroundSession.shared.packQueued(key: key, userInitiated: userInitiated)
+            enqueue(PendingSync(key: key, userInitiated: userInitiated) { [weak self] in
+                await self?.sync(info: info, key: key)
+            })
         } else {
+            dropPending(key: key)
             tasks[key]?.cancel()
             tasks[key] = nil
             store.removePack(id: key)
@@ -71,32 +87,73 @@ final class StickerSyncEngine: ObservableObject {
     }
 
     func resetAllPhases() {
+        pendingSyncs.removeAll()
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
         phases.removeAll()
     }
 
-    /// One queued pack ended (converted, failed, or cancelled); when the
-    /// whole queue drains, the background session can let the process rest.
-    private func noteSyncTaskDrained() {
-        SyncBackgroundSession.shared.packFinished()
-        if tasks.isEmpty {
+    // MARK: - Queue
+
+    private func enqueue(_ item: PendingSync) {
+        if item.userInitiated, let index = pendingSyncs.firstIndex(where: { !$0.userInitiated }) {
+            pendingSyncs.insert(item, at: index)
+        } else {
+            pendingSyncs.append(item)
+        }
+        ensureRunner()
+    }
+
+    private func ensureRunner() {
+        guard runner == nil, !pendingSyncs.isEmpty else { return }
+        runner = Task { [weak self] in
+            while let self, !self.pendingSyncs.isEmpty {
+                let next = self.pendingSyncs.removeFirst()
+                self.runningKey = next.key
+                let work = Task { await next.run() }
+                self.tasks[next.key] = work
+                await work.value
+                self.tasks[next.key] = nil
+                self.runningKey = nil
+                self.noteSyncEnded(key: next.key)
+            }
+            self?.runner = nil
+        }
+    }
+
+    /// Removes a not-yet-started sync from the queue (toggle-off, engine
+    /// shutdown) and settles its phase and session bookkeeping.
+    private func dropPending(key: String) {
+        guard let index = pendingSyncs.firstIndex(where: { $0.key == key }) else { return }
+        pendingSyncs.remove(at: index)
+        phases[key] = store.syncedPackIDs().contains(key) ? .synced : .idle
+        noteSyncEnded(key: key)
+    }
+
+    /// One queued pack ended (converted, failed, cancelled, or dropped);
+    /// when the whole queue drains, the background session can rest.
+    private func noteSyncEnded(key: String) {
+        SyncBackgroundSession.shared.packFinished(key: key)
+        if pendingSyncs.isEmpty, runningKey == nil {
             SyncBackgroundSession.shared.allDrained()
         }
     }
 
     /// Stops in-flight syncs without touching what is already synced —
-    /// used when background execution time runs out. Interrupted refreshes
-    /// keep their existing copy via `rollBack`.
+    /// used when background execution time runs out. The interrupted
+    /// refresh keeps its existing copy via `rollBack`; pending items are
+    /// dropped and retried by the next maintenance pass.
     func cancelActiveSyncs() {
+        for key in pendingSyncs.map(\.key) {
+            dropPending(key: key)
+        }
         tasks.values.forEach { $0.cancel() }
     }
 
     /// Waits for the sync queue to drain (used by background maintenance).
     func waitUntilIdle() async {
-        while !tasks.isEmpty, !Task.isCancelled {
-            _ = await syncChain?.value
-            await Task.yield()
+        while !Task.isCancelled, let current = runner {
+            _ = await current.value
         }
     }
 
@@ -119,6 +176,7 @@ final class StickerSyncEngine: ObservableObject {
     /// Removes a pack that no longer exists on the Telegram side (deleted or
     /// archived there), so only the local copy is left to clean up.
     func removeLocalPack(id: String) {
+        dropPending(key: id)
         tasks[id]?.cancel()
         tasks[id] = nil
         store.removePack(id: id)
@@ -137,24 +195,17 @@ final class StickerSyncEngine: ObservableObject {
 
     static let gifsPackID = "gifs"
 
-    func setGifSyncEnabled(_ enabled: Bool) {
+    func setGifSyncEnabled(_ enabled: Bool, userInitiated: Bool = true) {
         let key = Self.gifsPackID
         if enabled {
-            guard tasks[key] == nil else { return }
+            guard !queuedKeys.contains(key) else { return }
             phases[key] = .syncing(progress: 0)
-            SyncBackgroundSession.shared.packQueued()
-            let predecessor = syncChain
-            let task = Task { [weak self] in
-                _ = await predecessor?.value
-                if !Task.isCancelled {
-                    await self?.syncGifs(key: key)
-                }
-                self?.tasks[key] = nil
-                self?.noteSyncTaskDrained()
-            }
-            tasks[key] = task
-            syncChain = task
+            SyncBackgroundSession.shared.packQueued(key: key, userInitiated: userInitiated)
+            enqueue(PendingSync(key: key, userInitiated: userInitiated) { [weak self] in
+                await self?.syncGifs(key: key)
+            })
         } else {
+            dropPending(key: key)
             tasks[key]?.cancel()
             tasks[key] = nil
             store.removePack(id: key)
@@ -171,12 +222,18 @@ final class StickerSyncEngine: ObservableObject {
         _ items: [Item],
         syncToken: String,
         directory: URL,
-        onProgress: @escaping @MainActor (Double) -> Void,
+        weight: (Item) -> Double = { _ in 1 },
+        onProgress: @escaping @MainActor (_ completed: Int, _ total: Int, _ fraction: Double) -> Void,
         convert: @escaping @Sendable (Item) async throws -> (output: StickerConverter.Output, emoji: String)
     ) async throws -> [StickerManifest.Sticker] {
         var results: [(index: Int, sticker: StickerManifest.Sticker)] = []
-        var completed = 0.0
-        let total = Double(items.count)
+        var completed = 0
+        // Progress is weighted by expected conversion cost — a video
+        // sticker takes orders of magnitude longer than a static one, and
+        // an equal-weight bar would sprint through the statics then stall.
+        let weights = items.map(weight)
+        let totalWeight = max(weights.reduce(0, +), 1)
+        var completedWeight = 0.0
 
         try await withThrowingTaskGroup(of: (Int, StickerManifest.Sticker?).self) { group in
             var next = 0
@@ -212,7 +269,8 @@ final class StickerSyncEngine: ObservableObject {
             while let (index, sticker) = try await group.next() {
                 if let sticker { results.append((index, sticker)) }
                 completed += 1
-                onProgress(completed / total)
+                completedWeight += weights[index]
+                onProgress(completed, items.count, completedWeight / totalWeight)
                 enqueue(&group)
             }
         }
@@ -237,9 +295,13 @@ final class StickerSyncEngine: ObservableObject {
                 animations,
                 syncToken: syncToken,
                 directory: directory,
-                onProgress: { [weak self] fraction in
+                weight: { $0.mimeType.hasPrefix("video") ? 10 : 2 },
+                onProgress: { [weak self] completed, total, fraction in
                     self?.phases[key] = .syncing(progress: fraction)
-                    SyncBackgroundSession.shared.updateProgress(packTitle: "Saved GIFs", fraction: fraction)
+                    SyncBackgroundSession.shared.updateProgress(
+                        key: key, packTitle: "Saved GIFs",
+                        completed: completed, total: total, fraction: fraction
+                    )
                 },
                 convert: { [telegram] animation in
                     let path = try await telegram.download(file: animation.animation)
@@ -298,9 +360,22 @@ final class StickerSyncEngine: ObservableObject {
                 stickers,
                 syncToken: syncToken,
                 directory: directory,
-                onProgress: { [weak self] fraction in
+                // Rough foreground cost ratios: webp ~instant, TGS renders
+                // in fractions of a second, webm decodes+encodes for many
+                // seconds.
+                weight: { sticker in
+                    switch sticker.format {
+                    case .stickerFormatWebp: return 1
+                    case .stickerFormatTgs: return 6
+                    case .stickerFormatWebm: return 20
+                    }
+                },
+                onProgress: { [weak self] completed, total, fraction in
                     self?.phases[key] = .syncing(progress: fraction)
-                    SyncBackgroundSession.shared.updateProgress(packTitle: title, fraction: fraction)
+                    SyncBackgroundSession.shared.updateProgress(
+                        key: key, packTitle: title,
+                        completed: completed, total: total, fraction: fraction
+                    )
                 },
                 convert: { [weak self] sticker in
                     guard let self else { throw CancellationError() }
@@ -309,6 +384,13 @@ final class StickerSyncEngine: ObservableObject {
             )
 
             guard !manifestStickers.isEmpty else { throw ShiiruError.conversionFailed }
+
+            // First-time packs pin to the top of the saved order — the same
+            // spot the "NEW" row occupies — so they don't sink to the bottom
+            // of the app list and the iMessage panel after a relaunch.
+            if !Preferences.packOrder.contains(key), !store.syncedPackIDs().contains(key) {
+                Preferences.packOrder = [key] + Preferences.packOrder
+            }
 
             store.upsert(pack: StickerManifest.Pack(
                 id: key,

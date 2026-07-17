@@ -135,13 +135,13 @@ enum BackgroundMaintenance {
 
             let engine = StickerSyncEngine.shared
             for info in installed where stickerIDs.contains(String(info.id.rawValue)) {
-                engine.setSyncEnabled(true, for: info)
+                engine.setSyncEnabled(true, for: info, userInitiated: false)
             }
             for info in emoji where emojiIDs.contains(String(info.id.rawValue)) {
-                engine.setSyncEnabled(true, for: info)
+                engine.setSyncEnabled(true, for: info, userInitiated: false)
             }
             if plan.resyncGifs {
-                engine.setGifSyncEnabled(true)
+                engine.setGifSyncEnabled(true, userInitiated: false)
             }
             await engine.waitUntilIdle()
             log.info("maintenance finished")
