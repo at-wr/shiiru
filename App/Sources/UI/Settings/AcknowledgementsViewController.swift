@@ -136,7 +136,7 @@ final class TextPageViewController: UIViewController {
         view.backgroundColor = .systemBackground
         navigationItem.largeTitleDisplayMode = .never
 
-        scrollView.showsHorizontalScrollIndicator = true
+        scrollView.showsHorizontalScrollIndicator = false
         scrollView.isDirectionalLockEnabled = true
         scrollView.contentInsetAdjustmentBehavior = .never
         view.addSubview(scrollView)
@@ -146,6 +146,7 @@ final class TextPageViewController: UIViewController {
         textView.textColor = .label
         textView.isEditable = false
         textView.alwaysBounceVertical = true
+        textView.showsVerticalScrollIndicator = false
         textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 20, left: 16, bottom: 32, right: 16)
         textView.preferSoftTopEdge()
