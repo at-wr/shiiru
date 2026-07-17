@@ -50,6 +50,7 @@ final class StickerSyncEngine: ObservableObject {
         if enabled {
             guard tasks[key] == nil else { return }
             phases[key] = .syncing(progress: 0)
+            SyncBackgroundSession.shared.packQueued()
             let predecessor = syncChain
             let task = Task { [weak self] in
                 _ = await predecessor?.value
@@ -57,6 +58,7 @@ final class StickerSyncEngine: ObservableObject {
                     await self?.sync(info: info, key: key)
                 }
                 self?.tasks[key] = nil
+                self?.noteSyncTaskDrained()
             }
             tasks[key] = task
             syncChain = task
@@ -72,6 +74,24 @@ final class StickerSyncEngine: ObservableObject {
         tasks.values.forEach { $0.cancel() }
         tasks.removeAll()
         phases.removeAll()
+    }
+
+    /// One queued pack ended (converted, failed, or cancelled); when the
+    /// whole queue drains, the background session can let the process rest.
+    private func noteSyncTaskDrained() {
+        SyncBackgroundSession.shared.packFinished()
+        if tasks.isEmpty {
+            SyncBackgroundSession.shared.allDrained()
+        }
+    }
+
+    /// Removes a pack that no longer exists on the Telegram side (deleted or
+    /// archived there), so only the local copy is left to clean up.
+    func removeLocalPack(id: String) {
+        tasks[id]?.cancel()
+        tasks[id] = nil
+        store.removePack(id: id)
+        phases[id] = nil
     }
 
     func adoptStorePhases() {
@@ -91,6 +111,7 @@ final class StickerSyncEngine: ObservableObject {
         if enabled {
             guard tasks[key] == nil else { return }
             phases[key] = .syncing(progress: 0)
+            SyncBackgroundSession.shared.packQueued()
             let predecessor = syncChain
             let task = Task { [weak self] in
                 _ = await predecessor?.value
@@ -98,6 +119,7 @@ final class StickerSyncEngine: ObservableObject {
                     await self?.syncGifs(key: key)
                 }
                 self?.tasks[key] = nil
+                self?.noteSyncTaskDrained()
             }
             tasks[key] = task
             syncChain = task
@@ -109,6 +131,63 @@ final class StickerSyncEngine: ObservableObject {
         }
     }
 
+    /// Runs download+convert pipelines with bounded parallelism: while one
+    /// item sits in the CPU-heavy encoder, the next is already downloading
+    /// and decoding. Two lanes roughly halve pack sync time while keeping
+    /// the transient frame-buffer memory bounded. Output preserves pack
+    /// order; individual failures are skipped exactly like before.
+    private func convertItems<Item: Sendable>(
+        _ items: [Item],
+        syncToken: String,
+        directory: URL,
+        onProgress: @escaping @MainActor (Double) -> Void,
+        convert: @escaping @Sendable (Item) async throws -> (output: StickerConverter.Output, emoji: String)
+    ) async throws -> [StickerManifest.Sticker] {
+        var results: [(index: Int, sticker: StickerManifest.Sticker)] = []
+        var completed = 0.0
+        let total = Double(items.count)
+
+        try await withThrowingTaskGroup(of: (Int, StickerManifest.Sticker?).self) { group in
+            var next = 0
+            // `Swift.Error` spelled explicitly: TDLibKit exports its own
+            // `Error` type that would otherwise shadow it here.
+            func enqueue(_ group: inout ThrowingTaskGroup<(Int, StickerManifest.Sticker?), any Swift.Error>) {
+                guard next < items.count else { return }
+                let index = next
+                let item = items[index]
+                next += 1
+                group.addTask {
+                    do {
+                        let (output, emoji) = try await convert(item)
+                        let fileName = String(
+                            format: "%03d-%@.%@", index, syncToken, output.fileExtension
+                        )
+                        try output.data.write(
+                            to: directory.appendingPathComponent(fileName), options: .atomic
+                        )
+                        return (index, StickerManifest.Sticker(
+                            fileName: fileName, emoji: emoji, isAnimated: output.isAnimated
+                        ))
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        NSLog("[Shiiru] Skipping item \(index): \(error)")
+                        return (index, nil)
+                    }
+                }
+            }
+            enqueue(&group)
+            enqueue(&group)
+            while let (index, sticker) = try await group.next() {
+                if let sticker { results.append((index, sticker)) }
+                completed += 1
+                onProgress(completed / total)
+                enqueue(&group)
+            }
+        }
+        return results.sorted { $0.index < $1.index }.map(\.sticker)
+    }
+
     private func syncGifs(key: String) async {
         do {
             let animations = try await telegram.savedAnimations()
@@ -117,15 +196,19 @@ final class StickerSyncEngine: ObservableObject {
             let syncToken = String(UUID().uuidString.prefix(6))
             let directoryName = "\(key)-\(syncToken)"
             let directory = try store.prepareDirectory(named: directoryName)
-            var completed = 0.0
-            var manifestStickers: [StickerManifest.Sticker] = []
 
             for animation in animations {
                 _ = try? await telegram.downloadFile(startingOnly: animation.animation)
             }
-            for (index, animation) in animations.enumerated() {
-                try Task.checkCancellation()
-                do {
+            let manifestStickers = try await convertItems(
+                animations,
+                syncToken: syncToken,
+                directory: directory,
+                onProgress: { [weak self] fraction in
+                    self?.phases[key] = .syncing(progress: fraction)
+                    SyncBackgroundSession.shared.updateProgress(packTitle: "Saved GIFs", fraction: fraction)
+                },
+                convert: { [telegram] animation in
                     let path = try await telegram.download(file: animation.animation)
                     let isVideo = animation.mimeType.hasPrefix("video")
                     let output: StickerConverter.Output = try await Task.detached(priority: .userInitiated) {
@@ -134,21 +217,9 @@ final class StickerSyncEngine: ObservableObject {
                         }
                         return try StickerConverter.convertAnimatedImage(at: path)
                     }.value
-                    let fileName = String(
-                        format: "%03d-%@.%@", index, syncToken, output.fileExtension
-                    )
-                    try output.data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
-                    manifestStickers.append(StickerManifest.Sticker(
-                        fileName: fileName, emoji: "", isAnimated: output.isAnimated
-                    ))
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    NSLog("[Shiiru] Skipping GIF \(index): \(error)")
+                    return (output, "")
                 }
-                completed += 1
-                phases[key] = .syncing(progress: completed / Double(animations.count))
-            }
+            )
             guard !manifestStickers.isEmpty else { throw ShiiruError.conversionFailed }
             store.upsert(pack: StickerManifest.Pack(
                 id: key, name: key, title: "GIFs",
@@ -180,37 +251,25 @@ final class StickerSyncEngine: ObservableObject {
             let syncToken = String(UUID().uuidString.prefix(6))
             let directoryName = "\(key)-\(syncToken)"
             let directory = try store.prepareDirectory(named: directoryName)
-            var completed = 0.0
-            let total = Double(stickers.count)
-            var manifestStickers: [StickerManifest.Sticker] = []
 
             for sticker in stickers {
                 _ = try? await telegram.downloadFile(startingOnly: sticker.sticker)
             }
 
-            for (index, sticker) in stickers.enumerated() {
-                try Task.checkCancellation()
-                do {
-                    let output = try await convert(sticker: sticker)
-
-                    let fileName = String(
-                        format: "%03d-%@.%@", index, syncToken, output.fileExtension
-                    )
-                    try output.data.write(to: directory.appendingPathComponent(fileName), options: .atomic)
-                    manifestStickers.append(StickerManifest.Sticker(
-                        fileName: fileName,
-                        emoji: sticker.emoji,
-                        isAnimated: output.isAnimated
-                    ))
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-
-                    NSLog("[Shiiru] Skipping sticker \(index) in \(info.name): \(error)")
+            let title = set.title
+            let manifestStickers = try await convertItems(
+                stickers,
+                syncToken: syncToken,
+                directory: directory,
+                onProgress: { [weak self] fraction in
+                    self?.phases[key] = .syncing(progress: fraction)
+                    SyncBackgroundSession.shared.updateProgress(packTitle: title, fraction: fraction)
+                },
+                convert: { [weak self] sticker in
+                    guard let self else { throw CancellationError() }
+                    return (try await self.convert(sticker: sticker), sticker.emoji)
                 }
-                completed += 1
-                phases[key] = .syncing(progress: completed / total)
-            }
+            )
 
             guard !manifestStickers.isEmpty else { throw ShiiruError.conversionFailed }
 
@@ -262,8 +321,8 @@ final class StickerSyncEngine: ObservableObject {
 
             guard let thumbnail = sticker.thumbnail else { throw ShiiruError.unsupportedSticker }
             let thumbPath = try await telegram.download(file: thumbnail.file)
-            return .png(try await Task.detached(priority: .userInitiated) {
-                try StickerConverter.convertStaticImage(at: thumbPath)
+            return .png(try await Task.detached(priority: .userInitiated) { [fill] in
+                try StickerConverter.convertStaticImage(at: thumbPath, fillCanvas: fill)
             }.value)
         }
     }

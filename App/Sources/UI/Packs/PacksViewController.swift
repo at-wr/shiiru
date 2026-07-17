@@ -13,9 +13,17 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     private var emojiSets: [StickerSetInfo] = []
     private var gifCount = 0
     private var gifCoverFile: File?
+    /// Synced packs that no longer exist in the user's Telegram account
+    /// (deleted or archived there). They stay usable in iMessage, so they
+    /// stay visible here — in their own section — until switched off.
+    private var orphanedPacks: [StickerManifest.Pack] = []
     private let kindSwitcher = UISegmentedControl(items: ["Stickers", "Emoji", "GIFs"])
     private var currentKind: Int { kindSwitcher.selectedSegmentIndex }
     private var visibleSets: [StickerSetInfo] { currentKind == 1 ? emojiSets : sets }
+    private var visibleOrphans: [StickerManifest.Pack] {
+        let kind = currentKind == 1 ? "emoji" : "sticker"
+        return currentKind == 2 ? [] : orphanedPacks.filter { $0.packKind == kind }
+    }
 
     private var newPackIDs: Set<String> = []
     private var cancellables = Set<AnyCancellable>()
@@ -105,6 +113,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         alert.addAction(UIAlertAction(title: "Remove All", style: .destructive) { [weak self] _ in
             SharedStickerStore.shared.removeAll()
             StickerSyncEngine.shared.resetAllPhases()
+            self?.orphanedPacks = []
             self?.tableView.reloadData()
             Haptics.success()
         })
@@ -142,10 +151,12 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                 fetched = try await TelegramService.shared.installedStickerSets()
             }
             sets = arrange(fetched)
-            emojiSets = (try? await TelegramService.shared.customEmojiSets()) ?? []
+            let fetchedEmoji = try? await TelegramService.shared.customEmojiSets()
+            emojiSets = fetchedEmoji ?? []
             let animations = (try? await TelegramService.shared.savedAnimations()) ?? []
             gifCount = animations.count
             gifCoverFile = animations.first?.thumbnail?.file
+            refreshOrphans(fetched: fetched, fetchedEmoji: fetchedEmoji)
             sync.prefetchCovers(for: sets)
             reconvertStalePacks()
             tableView.reloadData()
@@ -164,6 +175,25 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         }
         loadingSpinner.stopAnimating()
         refreshControl.endRefreshing()
+    }
+
+    /// Diffs the synced store against what Telegram reports as installed.
+    /// Only kinds whose fetch actually succeeded participate, so a transient
+    /// network failure never misclassifies live packs as orphaned.
+    private func refreshOrphans(fetched: [StickerSetInfo], fetchedEmoji: [StickerSetInfo]?) {
+        guard !DemoSession.isActive, !PreviewMode.isActive else {
+            orphanedPacks = []
+            return
+        }
+        let stickerIDs = Set(fetched.map { String($0.id.rawValue) })
+        let emojiIDs = fetchedEmoji.map { Set($0.map { String($0.id.rawValue) }) }
+        orphanedPacks = SharedStickerStore.shared.loadManifest().packs.filter { pack in
+            switch pack.packKind {
+            case "sticker": return !stickerIDs.contains(pack.id)
+            case "emoji": return emojiIDs.map { !$0.contains(pack.id) } ?? false
+            default: return false
+            }
+        }
     }
 
     private func reconvertStalePacks() {
@@ -245,16 +275,19 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         }
     }
 
+    /// Phase ticks arrive for every converted sticker; update only the
+    /// status/progress of visible cells. Re-running the full `configure`
+    /// here re-fired cover loads and made thumbnails flash on every tick.
     private func reloadVisibleRows() {
-        if currentKind == 2 { tableView.reloadData(); return }
-        for indexPath in tableView.indexPathsForVisibleRows ?? [] {
-            guard let cell = tableView.cellForRow(at: indexPath) as? PackCell,
-                  indexPath.row < visibleSets.count, currentKind != 2 else { continue }
-            configure(cell, with: visibleSets[indexPath.row])
+        for cell in tableView.visibleCells {
+            guard let cell = cell as? PackCell, let id = cell.representedID else { continue }
+            cell.update(phase: sync.phases[id] ?? .idle)
         }
     }
 
-    func numberOfSections(in tableView: UITableView) -> Int { 1 }
+    func numberOfSections(in tableView: UITableView) -> Int {
+        visibleOrphans.isEmpty ? 1 : 2
+    }
 
     @objc private func kindChanged() {
         Haptics.tap()
@@ -262,11 +295,19 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     }
 
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        currentKind == 2 ? 1 : visibleSets.count
+        if section == 1 { return visibleOrphans.count }
+        return currentKind == 2 ? 1 : visibleSets.count
+    }
+
+    func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        section == 1 ? "No Longer on Telegram" : nil
     }
 
     func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
-        sets.isEmpty
+        if section == 1 {
+            return "These packs were removed or archived in Telegram. They still work in iMessage; switch one off to delete it from this device."
+        }
+        return sets.isEmpty
             ? nil
             : "Enabled packs appear in Messages: open a conversation, tap ‘+’, and scroll to Shiiru. Hold and drag to re-arrange."
     }
@@ -275,6 +316,10 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         let cell = tableView.dequeueReusableCell(
             withIdentifier: PackCell.reuseIdentifier, for: indexPath
         ) as! PackCell
+        if indexPath.section == 1 {
+            configureOrphan(cell, at: indexPath.row)
+            return cell
+        }
         if currentKind == 2 {
             let key = StickerSyncEngine.gifsPackID
             cell.representedID = key
@@ -300,6 +345,41 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         }
         configure(cell, with: visibleSets[indexPath.row])
         return cell
+    }
+
+    private func configureOrphan(_ cell: PackCell, at index: Int) {
+        let pack = visibleOrphans[index]
+        cell.representedID = pack.id
+        cell.configure(
+            title: pack.title,
+            subtitle: "\(pack.stickers.count) stickers",
+            phase: .synced
+        )
+        cell.onToggle = { [weak self] enabled in
+            guard !enabled else { return }
+            self?.removeOrphan(id: pack.id)
+        }
+        // The artwork already lives on disk; use the first sticker as cover.
+        if let sticker = pack.stickers.first {
+            let url = SharedStickerStore.shared.fileURL(pack: pack, sticker: sticker)
+            Task { [weak cell] in
+                let image = await Task.detached { UIImage(contentsOfFile: url.path) }.value
+                guard let image, cell?.representedID == pack.id else { return }
+                cell?.setThumbnail(image)
+            }
+        }
+    }
+
+    private func removeOrphan(id: String) {
+        sync.removeLocalPack(id: id)
+        guard let index = visibleOrphans.firstIndex(where: { $0.id == id }) else { return }
+        orphanedPacks.removeAll { $0.id == id }
+        if visibleOrphans.isEmpty {
+            tableView.deleteSections(IndexSet(integer: 1), with: .automatic)
+        } else {
+            tableView.deleteRows(at: [IndexPath(row: index, section: 1)], with: .automatic)
+        }
+        Haptics.success()
     }
 
     private func configure(_ cell: PackCell, with info: StickerSetInfo) {
@@ -338,7 +418,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     }
 
     func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
-        currentKind == 0
+        currentKind == 0 && indexPath.section == 0
     }
 
     func tableView(
@@ -361,6 +441,7 @@ extension PacksViewController: UITableViewDragDelegate, UITableViewDropDelegate 
         itemsForBeginning session: UIDragSession,
         at indexPath: IndexPath
     ) -> [UIDragItem] {
+        guard indexPath.section == 0, currentKind == 0, indexPath.row < sets.count else { return [] }
         let item = UIDragItem(itemProvider: NSItemProvider())
         item.localObject = sets[indexPath.row]
         return [item]

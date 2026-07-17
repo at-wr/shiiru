@@ -101,10 +101,23 @@ final class PackCell: UITableViewCell {
         onToggle = nil
     }
 
+    private var subtitle = ""
+
     func configure(title: String, subtitle: String, phase: StickerSyncEngine.Phase, isNew: Bool = false) {
         titleLabel.text = title
         newBadge.isHidden = !isNew
+        self.subtitle = subtitle
+        apply(phase: phase)
+    }
 
+    /// Lightweight path for sync progress ticks: touches only the status
+    /// line, progress bar, and switch — never the thumbnail, so covers
+    /// don't reload (and flash) on every tick.
+    func update(phase: StickerSyncEngine.Phase) {
+        apply(phase: phase)
+    }
+
+    private func apply(phase: StickerSyncEngine.Phase) {
         switch phase {
         case .idle:
             statusLabel.text = subtitle
