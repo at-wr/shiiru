@@ -56,7 +56,9 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         tableView.register(PackCell.self, forCellReuseIdentifier: PackCell.reuseIdentifier)
         tableView.backgroundColor = .clear
         tableView.separatorInset = UIEdgeInsets(top: 0, left: 80, bottom: 0, right: 0)
-        kindSwitcher.selectedSegmentIndex = 0
+        kindSwitcher.selectedSegmentIndex =
+            (0..<kindSwitcher.numberOfSegments).contains(Preferences.packListKind)
+                ? Preferences.packListKind : 0
         kindSwitcher.addTarget(self, action: #selector(kindChanged), for: .valueChanged)
         let header = SwitcherHeaderView(frame: CGRect(x: 0, y: 0, width: view.bounds.width, height: 44))
         header.install(kindSwitcher)
@@ -294,6 +296,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
 
     @objc private func kindChanged() {
         Haptics.tap()
+        Preferences.packListKind = currentKind
         tableView.reloadData()
     }
 
@@ -408,12 +411,21 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                 self?.sync.setSyncEnabled(enabled, for: info)
             }
         }
+        // Cached covers paint synchronously so list rebuilds don't flash
+        // blank thumbnails; only misses go through the async path.
+        let cachedCover = StickerSyncEngine.shared.cachedCover(for: info)
+        let cachedAnimation = StickerSyncEngine.shared.cachedAnimatedCover(for: info)
+        if let cachedCover { cell.setThumbnail(cachedCover) }
+        if let cachedAnimation { cell.setAnimatedThumbnail(cachedAnimation) }
+        guard cachedCover == nil || cachedAnimation == nil else { return }
         Task { [weak cell] in
-            if let image = await StickerSyncEngine.shared.coverImage(for: info),
+            if cachedCover == nil,
+               let image = await StickerSyncEngine.shared.coverImage(for: info),
                cell?.representedID == packID {
                 cell?.setThumbnail(image)
             }
-            if let animation = await StickerSyncEngine.shared.animatedCover(for: info),
+            if cachedAnimation == nil,
+               let animation = await StickerSyncEngine.shared.animatedCover(for: info),
                cell?.representedID == packID {
                 cell?.setAnimatedThumbnail(animation)
             }

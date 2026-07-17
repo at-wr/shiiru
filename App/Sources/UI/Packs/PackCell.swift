@@ -97,6 +97,10 @@ final class PackCell: UITableViewCell {
         thumbnailView.image = nil
         animationView.stop()
         animationView.animation = nil
+        // The Lottie canvas sits on top of the static thumbnail and can
+        // keep its last rendered frame past `animation = nil` — a reused
+        // row then flashes the previous pack's artwork over the new one.
+        animationView.alpha = 0
         representedID = nil
         onToggle = nil
     }
@@ -107,42 +111,45 @@ final class PackCell: UITableViewCell {
         titleLabel.text = title
         newBadge.isHidden = !isNew
         self.subtitle = subtitle
-        apply(phase: phase)
+        // Initial state, not a state change: animating the switch here made
+        // every (re)configured row visibly flip from the recycled cell's old
+        // position — a "reset then recompute" flicker on each list rebuild.
+        apply(phase: phase, animated: false)
     }
 
     /// Lightweight path for sync progress ticks: touches only the status
     /// line, progress bar, and switch — never the thumbnail, so covers
     /// don't reload (and flash) on every tick.
     func update(phase: StickerSyncEngine.Phase) {
-        apply(phase: phase)
+        apply(phase: phase, animated: true)
     }
 
-    private func apply(phase: StickerSyncEngine.Phase) {
+    private func apply(phase: StickerSyncEngine.Phase, animated: Bool) {
         switch phase {
         case .idle:
             statusLabel.text = subtitle
             statusLabel.textColor = .secondaryLabel
             progressView.isHidden = true
-            syncSwitch.setOn(false, animated: true)
+            syncSwitch.setOn(false, animated: animated)
             syncSwitch.isEnabled = true
         case .syncing(let progress):
             statusLabel.text = "Syncing…"
             statusLabel.textColor = Theme.accent
             progressView.isHidden = false
-            progressView.setProgress(Float(progress), animated: true)
-            syncSwitch.setOn(true, animated: true)
+            progressView.setProgress(Float(progress), animated: animated)
+            syncSwitch.setOn(true, animated: animated)
             syncSwitch.isEnabled = true
         case .synced:
             statusLabel.text = "In iMessage · \(subtitle)"
             statusLabel.textColor = .secondaryLabel
             progressView.isHidden = true
-            syncSwitch.setOn(true, animated: true)
+            syncSwitch.setOn(true, animated: animated)
             syncSwitch.isEnabled = true
         case .failed(let message):
             statusLabel.text = "Failed: \(message)"
             statusLabel.textColor = .systemRed
             progressView.isHidden = true
-            syncSwitch.setOn(false, animated: true)
+            syncSwitch.setOn(false, animated: animated)
             syncSwitch.isEnabled = true
         }
     }
@@ -152,6 +159,13 @@ final class PackCell: UITableViewCell {
         // Re-configures fire on every sync progress tick; only transition
         // when the image actually changes (covers are NSCache'd instances).
         guard thumbnailView.image !== image else { return }
+        // A cover landing in an empty cell (fresh configure from cache)
+        // paints instantly; the dissolve is only for swapping covers, so
+        // rebuilt lists don't shimmer.
+        guard thumbnailView.image != nil else {
+            thumbnailView.image = image
+            return
+        }
         UIView.transition(with: thumbnailView, duration: 0.2, options: .transitionCrossDissolve) {
             self.thumbnailView.image = image
         }
@@ -162,6 +176,7 @@ final class PackCell: UITableViewCell {
         // Same animation already installed: leave it playing untouched —
         // resetting it every phase update made covers flash and restart.
         if animationView.animation === animation {
+            animationView.alpha = 1
             if !animationView.isAnimationPlaying { animationView.play() }
             return
         }

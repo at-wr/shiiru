@@ -24,4 +24,11 @@ enum Preferences {
         get { defaults.bool(forKey: "autoAddNewPacks") }
         set { defaults.set(newValue, forKey: "autoAddNewPacks") }
     }
+
+    /// Last selected kind segment in My Stickers (Stickers/Emoji/GIFs),
+    /// restored across launches so the list opens where the user left it.
+    static var packListKind: Int {
+        get { defaults.integer(forKey: "packListKind") }
+        set { defaults.set(newValue, forKey: "packListKind") }
+    }
 }

@@ -451,6 +451,16 @@ final class StickerSyncEngine: ObservableObject {
         }
     }
 
+    /// Synchronous cache hits let list rebuilds (segment switches, full
+    /// reloads) paint covers immediately instead of blank-then-fill.
+    func cachedCover(for info: StickerSetInfo) -> UIImage? {
+        thumbnailCache.object(forKey: String(info.id.rawValue) as NSString)
+    }
+
+    func cachedAnimatedCover(for info: StickerSetInfo) -> LottieAnimation? {
+        animationCache.object(forKey: String(info.id.rawValue) as NSString)
+    }
+
     func coverImage(for info: StickerSetInfo) async -> UIImage? {
         let key = String(info.id.rawValue) as NSString
         if let cached = thumbnailCache.object(forKey: key) { return cached }
