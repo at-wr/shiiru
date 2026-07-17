@@ -155,7 +155,11 @@ final class SyncBackgroundSession {
         // running inside a BGProcessingTask window need no extra keepalive.
         guard UIApplication.shared.applicationState == .active else { return }
 
-        if legacyToken == .invalid {
+        // The UIKit task only bridges the gap until the continued task
+        // launches (and is the whole keepalive pre-26); once one is
+        // adopted it must not linger — holding both trips UIKit's
+        // 30-second background-task warning and risks termination.
+        if legacyToken == .invalid, continuedTask == nil {
             legacyToken = UIApplication.shared.beginBackgroundTask(withName: "StickerSync") { [weak self] in
                 Self.trace("legacy background task expired")
                 self?.endLegacyTask()
@@ -217,6 +221,9 @@ final class SyncBackgroundSession {
         }
         Self.trace("continued task adopted (\(self.totalPacks) packs queued)")
         continuedTask = task
+        // The system now keeps the process alive; the bridge has done its
+        // job (field logs showed it lingering into the 30-second warning).
+        endLegacyTask()
         task.expirationHandler = { [weak self] in
             Task { @MainActor in
                 guard let self,
