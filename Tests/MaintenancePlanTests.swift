@@ -9,7 +9,8 @@ final class MaintenancePlanTests: XCTestCase {
         _ id: String,
         kind: String = "sticker",
         converter: Int = 10,
-        sourceCount: Int? = 12
+        sourceCount: Int? = 12,
+        sourceHash: String? = nil
     ) -> StickerManifest.Pack {
         StickerManifest.Pack(
             id: id, name: id, title: id,
@@ -17,6 +18,7 @@ final class MaintenancePlanTests: XCTestCase {
             kind: kind,
             converterVersion: converter,
             sourceCount: sourceCount,
+            sourceHash: sourceHash,
             stickers: [.init(fileName: "0.png", emoji: "😀", isAnimated: false)]
         )
     }
@@ -139,6 +141,53 @@ final class MaintenancePlanTests: XCTestCase {
             gifCount: 3
         )
         XCTAssertFalse(unchanged.resyncGifs)
+    }
+
+    func testSameCountPacksWithFingerprintGetVerification() {
+        // One removed + one added keeps the count identical; such packs are
+        // flagged for a full-set fingerprint comparison instead of a blind
+        // re-sync.
+        let plan = MaintenancePlan.compute(
+            manifest: manifest([
+                pack("1", sourceHash: "abc"),
+                pack("2", kind: "emoji", sourceHash: "def"),
+                pack("3"), // legacy: no fingerprint recorded yet
+            ]),
+            installed: [.init(id: "1", size: 12), .init(id: "3", size: 12)],
+            emoji: [.init(id: "2", size: 12)],
+            knownPackIDs: ["1", "2", "3"],
+            autoAddNewPacks: false,
+            pipelineVersion: pipeline
+        )
+        XCTAssertEqual(plan.verifyStickerIDs, ["1"])
+        XCTAssertEqual(plan.verifyEmojiIDs, ["2"])
+        XCTAssertTrue(plan.stickerSetIDs.isEmpty)
+        XCTAssertFalse(plan.isEmpty, "verification candidates count as work")
+    }
+
+    func testGifHashDriftTriggersResync() {
+        let plan = MaintenancePlan.compute(
+            manifest: manifest([pack("gifs", kind: "gif", sourceCount: 3, sourceHash: "old")]),
+            installed: [], emoji: [],
+            knownPackIDs: [], autoAddNewPacks: false,
+            pipelineVersion: pipeline,
+            gifCount: 3,
+            gifHash: "new"
+        )
+        XCTAssertTrue(plan.resyncGifs)
+    }
+
+    func testEmptiedGifListDoesNotChurn() {
+        // All saved GIFs deleted on Telegram: re-syncing can only fail, so
+        // the local copy is kept and no nightly churn happens.
+        let plan = MaintenancePlan.compute(
+            manifest: manifest([pack("gifs", kind: "gif", converter: 9, sourceCount: 3)]),
+            installed: [], emoji: [],
+            knownPackIDs: [], autoAddNewPacks: false,
+            pipelineVersion: pipeline,
+            gifCount: 0
+        )
+        XCTAssertFalse(plan.resyncGifs)
     }
 
     func testRemovedTelegramPacksAreLeftAlone() {

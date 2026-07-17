@@ -260,6 +260,7 @@ final class StickerSyncEngine: ObservableObject {
                 kind: "gif",
                 converterVersion: StickerConverter.pipelineVersion,
                 sourceCount: animations.count,
+                sourceHash: SourceFingerprint.hash(of: animations.map(\.animation.remote.uniqueId)),
                 directory: directoryName,
                 stickers: manifestStickers
             ))
@@ -317,6 +318,7 @@ final class StickerSyncEngine: ObservableObject {
                 kind: info.stickerType == .stickerTypeCustomEmoji ? "emoji" : "sticker",
                 converterVersion: StickerConverter.pipelineVersion,
                 sourceCount: stickers.count,
+                sourceHash: SourceFingerprint.hash(of: stickers.map(\.sticker.remote.uniqueId)),
                 directory: directoryName,
                 stickers: manifestStickers
             ))
