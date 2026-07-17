@@ -44,12 +44,27 @@ final class StickerPanelViewController: UIViewController {
         return view
     }()
 
+    /// Telegram's top-panel metrics: 28 pt collapsed items that grow to
+    /// 54×68 with titles while the row itself is being dragged
+    /// (EntityKeyboardTopPanelComponent), collapsing 0.8 s after the drag.
+    private static let collapsedTabSize = CGSize(width: 28, height: 28)
+    private static let expandedTabSize = CGSize(width: 54, height: 68)
+    private static let collapsedBarHeight: CGFloat = 40
+    private static let expandedBarHeight: CGFloat = 76
+    private static let tabRowSideInset: CGFloat = 4
+
+    private var tabBarHeightConstraint: NSLayoutConstraint?
+    private var tabBarExpanded = false
+    private var tabCollapseTimer: Timer?
+
     private lazy var tabBar: UICollectionView = {
         let layout = UICollectionViewFlowLayout()
         layout.scrollDirection = .horizontal
-        layout.itemSize = CGSize(width: 44, height: 44)
+        layout.itemSize = Self.collapsedTabSize
         layout.minimumInteritemSpacing = 6
-        layout.sectionInset = UIEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
+        layout.sectionInset = UIEdgeInsets(
+            top: 6, left: Self.tabRowSideInset, bottom: 6, right: Self.tabRowSideInset
+        )
         let view = UICollectionView(frame: .zero, collectionViewLayout: layout)
         view.backgroundColor = .clear
         view.showsHorizontalScrollIndicator = false
@@ -60,6 +75,56 @@ final class StickerPanelViewController: UIViewController {
         view.insertSubview(tabHighlight, at: 0)
         return view
     }()
+
+    /// Dragging the pack row grows its items (Telegram's expand-on-drag);
+    /// it settles back down 0.8 s after the finger leaves.
+    private func setTabBarExpanded(_ expanded: Bool) {
+        guard tabBarExpanded != expanded,
+              let layout = tabBar.collectionViewLayout as? UICollectionViewFlowLayout else { return }
+        tabBarExpanded = expanded
+
+        // Cell x-positions change with the item size, but contentOffset
+        // stays in old-geometry coordinates — uncompensated, the resize
+        // visibly scrolls the row to unrelated packs. Anchor whatever pack
+        // sits at the viewport's center through the change (Telegram's
+        // draggingFocusItemIndex serves the same purpose).
+        let sideInset = Self.tabRowSideInset
+        let spacing = layout.minimumInteritemSpacing
+        let oldSpan = layout.itemSize.width + spacing
+        let newSize = expanded ? Self.expandedTabSize : Self.collapsedTabSize
+        let newSpan = newSize.width + spacing
+        let midX = tabBar.bounds.width / 2
+        let anchor = max(0, (tabBar.contentOffset.x + midX - sideInset) / oldSpan)
+
+        layout.itemSize = newSize
+        layout.sectionInset.top = expanded ? 4 : 6
+        layout.sectionInset.bottom = expanded ? 4 : 6
+        tabBarHeightConstraint?.constant = expanded ? Self.expandedBarHeight : Self.collapsedBarHeight
+
+        let count = CGFloat(max(packs.count, 1))
+        let contentWidth = sideInset * 2 + count * newSpan - spacing
+        let maxOffset = max(0, contentWidth - tabBar.bounds.width)
+        let target = min(max(0, sideInset + anchor * newSpan - midX), maxOffset)
+
+        UIView.animate(
+            withDuration: 0.3, delay: 0,
+            usingSpringWithDamping: 0.85, initialSpringVelocity: 0,
+            options: [.allowUserInteraction]
+        ) {
+            layout.invalidateLayout()
+            self.tabBar.contentOffset = CGPoint(x: target, y: 0)
+            self.tabBar.layoutIfNeeded()
+            self.view.layoutIfNeeded()
+            self.updateGridInsets()
+        }
+    }
+
+    private func scheduleTabBarCollapse() {
+        tabCollapseTimer?.invalidate()
+        tabCollapseTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in
+            self?.setTabBarExpanded(false)
+        }
+    }
 
     private lazy var grid: UICollectionView = {
         let view = UICollectionView(frame: .zero, collectionViewLayout: makeGridLayout())
@@ -79,6 +144,13 @@ final class StickerPanelViewController: UIViewController {
 
     private let emptyState = UIStackView()
 
+    /// The strip region adds no material of its own: Messages already
+    /// backs the whole drawer with a translucent system backdrop, and any
+    /// extra layer reads as an opaque band against it. The grid starts
+    /// below the separator instead of passing under the row, so stickers
+    /// never show through either.
+    private let bottomFade = BottomEdgeFadeView()
+
     override func viewDidLoad() {
         super.viewDidLoad()
 
@@ -86,11 +158,18 @@ final class StickerPanelViewController: UIViewController {
         separator.backgroundColor = .separator
 
         let settingsButton = UIButton(type: .system)
-        settingsButton.setImage(
-            UIImage(named: "EntityInputSettingsIcon")?.withRenderingMode(.alwaysTemplate)
-                ?? UIImage(systemName: "gearshape.fill"),
-            for: .normal
-        )
+        // Drawn at the collapsed pack-thumbnail scale (24 pt art in 28 pt
+        // cells) so the gear doesn't dwarf the row; the 40 pt button keeps
+        // the hit target.
+        let rawIcon = UIImage(named: "EntityInputSettingsIcon")
+            ?? UIImage(systemName: "gearshape.fill")!
+        let iconSide: CGFloat = 22
+        let icon = UIGraphicsImageRenderer(size: CGSize(width: iconSide, height: iconSide))
+            .image { _ in
+                rawIcon.draw(in: CGRect(x: 0, y: 0, width: iconSide, height: iconSide))
+            }
+            .withRenderingMode(.alwaysTemplate)
+        settingsButton.setImage(icon, for: .normal)
         settingsButton.tintColor = .secondaryLabel
         settingsButton.addTarget(self, action: #selector(openApp), for: .touchUpInside)
 
@@ -101,26 +180,34 @@ final class StickerPanelViewController: UIViewController {
         }
 
         // The grid runs to the very bottom; the type switcher floats above
-        // it on a blurred capsule, exactly like Telegram's entity keyboard —
+        // it on a glass capsule, exactly like Telegram's entity keyboard —
         // stickers stay visible (and scroll) behind it instead of a dead
         // opaque strip being reserved.
-        for subview in [grid, settingsButton, tabBar, separator, typeSwitcher] {
+        for subview in [grid, bottomFade, settingsButton, tabBar, separator, typeSwitcher] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(subview)
         }
 
         buildEmptyState()
 
+        let barHeight = tabBar.heightAnchor.constraint(equalToConstant: Self.collapsedBarHeight)
+        tabBarHeightConstraint = barHeight
+        barHeight.isActive = true
+
         NSLayoutConstraint.activate([
             settingsButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             settingsButton.centerYAnchor.constraint(equalTo: tabBar.centerYAnchor),
-            settingsButton.widthAnchor.constraint(equalToConstant: 40),
+            // Narrow enough that the gear sits close to the first pack;
+            // the full-height button keeps the touch target comfortable.
+            settingsButton.widthAnchor.constraint(equalToConstant: 32),
             settingsButton.heightAnchor.constraint(equalToConstant: 40),
 
-            tabBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 4),
+            // Clear breathing room under Messages' grabber pill — flush
+            // against it, drags on the pack row kept triggering the
+            // expand-to-fullscreen gesture instead.
+            tabBar.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
             tabBar.leadingAnchor.constraint(equalTo: settingsButton.trailingAnchor),
             tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            tabBar.heightAnchor.constraint(equalToConstant: 52),
 
             separator.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             separator.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -132,8 +219,13 @@ final class StickerPanelViewController: UIViewController {
             grid.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             grid.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
+            bottomFade.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomFade.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomFade.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomFade.heightAnchor.constraint(equalToConstant: 80),
+
             typeSwitcher.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -4),
-            typeSwitcher.heightAnchor.constraint(equalToConstant: 36),
+            typeSwitcher.heightAnchor.constraint(equalToConstant: 40),
             typeSwitcher.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
             typeSwitcher.centerXAnchor.constraint(equalTo: view.centerXAnchor),
         ])
@@ -141,7 +233,8 @@ final class StickerPanelViewController: UIViewController {
 
     /// Keeps the last grid rows reachable above the floating switcher.
     private func updateGridInsets() {
-        let bottom: CGFloat = typeSwitcher.isHidden ? 8 : 36 + 4 + 12
+        let bottom: CGFloat = typeSwitcher.isHidden ? 8 : 40 + 4 + 12
+        bottomFade.isHidden = typeSwitcher.isHidden
         guard grid.contentInset.bottom != bottom else { return }
         grid.contentInset.bottom = bottom
         grid.verticalScrollIndicatorInsets.bottom = bottom
@@ -204,11 +297,12 @@ final class StickerPanelViewController: UIViewController {
             Mode.stickers.rawValue: all.filter { $0.pack.packKind == "sticker" },
             Mode.gifs.rawValue: all.filter { $0.pack.packKind == "gif" },
         ]
-        // Only synced categories appear, exactly like Telegram's panel.
+        // Only synced categories appear, in Telegram's pane order
+        // (EntityKeyboard.swift appends gifs, stickers, emoji).
         let available: [(String, Int)] = [
-            ("Emoji", Mode.emoji.rawValue),
-            ("Stickers", Mode.stickers.rawValue),
             ("GIFs", Mode.gifs.rawValue),
+            ("Stickers", Mode.stickers.rawValue),
+            ("Emoji", Mode.emoji.rawValue),
         ].filter { !(packsByMode[$0.1] ?? []).isEmpty }
         typeSwitcher.isHidden = available.count <= 1
         if !available.contains(where: { $0.1 == mode.rawValue }) {
@@ -259,8 +353,9 @@ final class StickerPanelViewController: UIViewController {
             )
         }
 
-        let itemSize: CGFloat = 44, itemSpacing: CGFloat = 6, sideInset: CGFloat = 10
-        let reveal = attributes.frame.insetBy(dx: -(sideInset + (itemSize + itemSpacing) * 2), dy: 0)
+        let layout = tabBar.collectionViewLayout as? UICollectionViewFlowLayout
+        let span = (layout?.itemSize.width ?? 28) + (layout?.minimumInteritemSpacing ?? 6)
+        let reveal = attributes.frame.insetBy(dx: -(Self.tabRowSideInset + span * 2), dy: 0)
         tabBar.scrollRectToVisible(reveal, animated: animated)
     }
 
@@ -289,6 +384,17 @@ final class StickerPanelViewController: UIViewController {
 
     @objc private func openApp() {
         onOpenApp?()
+    }
+
+    /// Messages assembles the extension off-window and attaches it late;
+    /// re-poke the visible cells once presentation settles so no animation
+    /// is left waiting on a lifecycle callback that already fired.
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        for cell in grid.visibleCells {
+            (cell as? StickerCell)?.didBecomeVisible()
+        }
+        installUnderlaysOnVisibleCells()
     }
 
     override func viewDidLayoutSubviews() {
@@ -406,7 +512,7 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
             let cell = collectionView.dequeueReusableCell(
                 withReuseIdentifier: PackTabCell.reuseIdentifier, for: indexPath
             ) as! PackTabCell
-            cell.configure(url: packs[indexPath.item].iconURL)
+            cell.configure(url: packs[indexPath.item].iconURL, title: packs[indexPath.item].pack.title)
             return cell
         }
         let cell = collectionView.dequeueReusableCell(
@@ -442,7 +548,33 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
         willDisplay cell: UICollectionViewCell,
         forItemAt indexPath: IndexPath
     ) {
-        (cell as? StickerCell)?.didBecomeVisible()
+        guard let cell = cell as? StickerCell else { return }
+        cell.didBecomeVisible()
+        // At rest (initial fill, small adjustments) install the underlay
+        // right away; during drags/jumps it waits for the scroll to settle.
+        if !gridIsScrolling {
+            cell.installUnderlayIfNeeded()
+        }
+    }
+
+    private var gridIsScrolling: Bool {
+        grid.isDragging || grid.isDecelerating || programmaticScrollTarget != nil
+    }
+
+    private func installUnderlaysOnVisibleCells() {
+        for cell in grid.visibleCells {
+            (cell as? StickerCell)?.installUnderlayIfNeeded()
+        }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        if scrollView === grid { installUnderlaysOnVisibleCells() }
+        if scrollView === tabBar { scheduleTabBarCollapse() }
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate: Bool) {
+        if scrollView === grid, !willDecelerate { installUnderlaysOnVisibleCells() }
+        if scrollView === tabBar, !willDecelerate { scheduleTabBarCollapse() }
     }
 
     func collectionView(
@@ -498,24 +630,43 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
         if let attributes = grid.layoutAttributesForSupplementaryElement(
             ofKind: UICollectionView.elementKindSectionHeader, at: target
         ) {
-            grid.setContentOffset(CGPoint(x: 0, y: attributes.frame.minY - 2), animated: true)
+            // Content scrolls under the translucent tab strip, so the top
+            // inset must be subtracted for the header to land below it.
+            // setContentOffset does not clamp: an unclamped jump to a short
+            // last pack parks the grid overscrolled past the content edge.
+            let inset = grid.adjustedContentInset
+            let minY = -inset.top
+            let maxY = max(minY, grid.contentSize.height + inset.bottom - grid.bounds.height)
+            let y = min(max(attributes.frame.minY - inset.top - 2, minY), maxY)
+            grid.setContentOffset(CGPoint(x: 0, y: y), animated: true)
         } else {
             programmaticScrollTarget = nil
         }
     }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-        if scrollView === grid { programmaticScrollTarget = nil }
+        if scrollView === grid {
+            programmaticScrollTarget = nil
+            installUnderlaysOnVisibleCells()
+        }
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         if scrollView === grid { programmaticScrollTarget = nil }
+        if scrollView === tabBar {
+            tabCollapseTimer?.invalidate()
+            setTabBarExpanded(true)
+        }
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard scrollView === grid, !packs.isEmpty, programmaticScrollTarget == nil else { return }
 
-        let topSection = grid.indexPathsForVisibleItems.map(\.section).min() ?? 0
+        // Rows behind the translucent tab strip don't count as "on top".
+        let topEdge = grid.contentOffset.y + grid.adjustedContentInset.top
+        let topSection = grid.indexPathsForVisibleItems
+            .filter { (grid.layoutAttributesForItem(at: $0)?.frame.maxY ?? 0) > topEdge }
+            .map(\.section).min() ?? 0
         if topSection != selectedTabIndex {
             setSelectedTab(topSection, animated: true)
         }
@@ -554,6 +705,8 @@ final class StickerCell: UICollectionViewCell {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    private var pendingUnderlay: (url: URL, description: String)?
+
     func configure(
         url: URL,
         description: String,
@@ -567,8 +720,20 @@ final class StickerCell: UICollectionViewCell {
 
         stickerView?.removeFromSuperview()
         stickerView = nil
-        guard peelable,
-              let sticker = try? MSSticker(contentsOfFileURL: url, localizedDescription: description)
+        // MSSticker validates the file and MSStickerView sets up its
+        // renderer — both main-thread work that made pack jumps stutter
+        // when every transit cell paid it. Cells fill with the cheap
+        // preview only; the underlay installs once scrolling settles.
+        pendingUnderlay = peelable ? (url, description) : nil
+    }
+
+    /// Creates the hit-testable MSStickerView underlay (tap-to-insert and
+    /// peel live there). Called when the grid is at rest.
+    func installUnderlayIfNeeded() {
+        guard let pending = pendingUnderlay, stickerView == nil,
+              let sticker = try? MSSticker(
+                  contentsOfFileURL: pending.url, localizedDescription: pending.description
+              )
         else { return }
         let view = MSStickerView(frame: contentView.bounds, sticker: sticker)
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -605,6 +770,7 @@ final class StickerCell: UICollectionViewCell {
         preview.isHidden = false
         stickerView?.removeFromSuperview()
         stickerView = nil
+        pendingUnderlay = nil
         transform = .identity
     }
 }
@@ -624,6 +790,7 @@ final class PackTabCell: UICollectionViewCell {
     static let reuseIdentifier = "PackTabCell"
 
     private let imageView = UIImageView()
+    private let titleLabel = UILabel()
     private var representedURL: URL?
 
     override init(frame: CGRect) {
@@ -631,18 +798,40 @@ final class PackTabCell: UICollectionViewCell {
         contentView.layer.cornerRadius = 10
         contentView.layer.cornerCurve = .continuous
         imageView.contentMode = .scaleAspectFit
-        imageView.frame = contentView.bounds.insetBy(dx: 5, dy: 5)
-        imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         contentView.addSubview(imageView)
+        // Telegram's expanded top-panel item: 10 pt title under the icon,
+        // visible only while the row is enlarged.
+        titleLabel.font = .systemFont(ofSize: 10)
+        titleLabel.textColor = .secondaryLabel
+        titleLabel.textAlignment = .center
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.alpha = 0
+        contentView.addSubview(titleLabel)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(url: URL?) {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Square cells are the collapsed style; the taller expanded cell
+        // stacks the title beneath the artwork.
+        let expanded = bounds.height > bounds.width + 4
+        if expanded {
+            imageView.frame = CGRect(x: 2, y: 2, width: bounds.width - 4, height: bounds.width - 4)
+            titleLabel.frame = CGRect(x: 1, y: bounds.width + 1, width: bounds.width - 2, height: 12)
+            titleLabel.alpha = 1
+        } else {
+            imageView.frame = bounds.insetBy(dx: 2, dy: 2)
+            titleLabel.alpha = 0
+        }
+    }
+
+    func configure(url: URL?, title: String) {
+        titleLabel.text = title
         representedURL = url
         imageView.image = nil
         guard let url else { return }
-        StickerPreview.thumbnail(for: url, pixelSide: 88) { [weak self] image in
+        StickerPreview.thumbnail(for: url, pixelSide: 160) { [weak self] image in
             guard let self, self.representedURL == url else { return }
             self.imageView.image = image
         }
@@ -674,26 +863,49 @@ final class PackHeaderView: UICollectionReusableView {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-/// Telegram-style entity-type switcher: a blurred capsule bar with a
-/// sliding highlight pill behind the selected type (a reimplementation of
-/// the look of Telegram's EntityKeyboardBottomPanel).
+/// Telegram-style entity-type switcher: a floating glass capsule with a
+/// sliding highlight pill behind the selected type — the look of Telegram's
+/// EntityKeyboardBottomPanel, on iOS 26 built from real liquid glass
+/// (UIGlassEffect), earlier from a chrome-material blur.
 final class EntityTypeSwitcher: UIView {
 
     var onSelect: ((Int) -> Void)?
 
-    private let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+    private let background: UIVisualEffectView = {
+        if #available(iOS 26.0, *) {
+            let glass = UIGlassEffect(style: .regular)
+            glass.isInteractive = true
+            let view = UIVisualEffectView(effect: glass)
+            view.cornerConfiguration = .capsule()
+            return view
+        }
+        let view = UIVisualEffectView(effect: UIBlurEffect(style: .systemChromeMaterial))
+        view.clipsToBounds = true
+        return view
+    }()
     private let highlight = UIView()
     private var buttons: [UIButton] = []
+    private var itemWidths: [CGFloat] = []
     private var selectedTag = 1
+
+    /// Telegram's bottom-panel tab typography: medium 14 pt labels with
+    /// 12 pt of horizontal padding each side (BottomPanelIconComponent).
+    private static let font = UIFont.systemFont(ofSize: 14, weight: .medium)
+    private static let itemPadding: CGFloat = 24
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        blur.frame = bounds
-        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        blur.clipsToBounds = true
-        addSubview(blur)
-        highlight.backgroundColor = UIColor.tertiarySystemFill
-        blur.contentView.addSubview(highlight)
+        background.frame = bounds
+        background.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(background)
+        // Telegram's resting-lens tint (LiquidLensView fallback blob).
+        highlight.backgroundColor = UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(white: 1.0, alpha: 0.1)
+                : UIColor(white: 0.0, alpha: 0.075)
+        }
+        highlight.isUserInteractionEnabled = false
+        background.contentView.addSubview(highlight)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -703,11 +915,14 @@ final class EntityTypeSwitcher: UIView {
         buttons = items.map { title, tag in
             let button = UIButton(type: .system)
             button.setTitle(title, for: .normal)
-            button.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
+            button.titleLabel?.font = Self.font
             button.tag = tag
             button.addTarget(self, action: #selector(tapped(_:)), for: .touchUpInside)
-            blur.contentView.addSubview(button)
+            background.contentView.addSubview(button)
             return button
+        }
+        itemWidths = items.map { title, _ in
+            ceil((title as NSString).size(withAttributes: [.font: Self.font]).width) + Self.itemPadding
         }
         selectedTag = selected
         invalidateIntrinsicContentSize()
@@ -721,7 +936,7 @@ final class EntityTypeSwitcher: UIView {
         selectedTag = sender.tag
         refreshColors()
         UIView.animate(
-            withDuration: 0.35, delay: 0,
+            withDuration: 0.4, delay: 0,
             usingSpringWithDamping: 0.8, initialSpringVelocity: 0
         ) {
             self.positionHighlight()
@@ -737,22 +952,56 @@ final class EntityTypeSwitcher: UIView {
 
     private func positionHighlight() {
         guard let selected = buttons.first(where: { $0.tag == selectedTag }) else { return }
-        highlight.frame = selected.frame.insetBy(dx: 2, dy: 3)
+        highlight.frame = selected.frame.insetBy(dx: 3, dy: 3)
         highlight.layer.cornerRadius = highlight.frame.height / 2
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        blur.layer.cornerRadius = bounds.height / 2
+        if #unavailable(iOS 26.0) {
+            background.layer.cornerRadius = bounds.height / 2
+        }
         guard !buttons.isEmpty else { return }
-        let width = bounds.width / CGFloat(buttons.count)
+        let total = itemWidths.reduce(0, +)
+        let scale = total > 0 ? min(1, bounds.width / total) : 1
+        var x: CGFloat = 0
         for (index, button) in buttons.enumerated() {
-            button.frame = CGRect(x: CGFloat(index) * width, y: 0, width: width, height: bounds.height)
+            let width = itemWidths[index] * scale
+            button.frame = CGRect(x: x, y: 0, width: width, height: bounds.height)
+            x += width
         }
         positionHighlight()
     }
 
     override var intrinsicContentSize: CGSize {
-        CGSize(width: CGFloat(max(buttons.count, 1)) * 104, height: 36)
+        CGSize(width: max(itemWidths.reduce(0, +), 96), height: 40)
+    }
+}
+
+/// A solid color masked by a vertical alpha ramp so grid content dissolves
+/// under the floating switcher instead of hard-clipping — the look of
+/// Telegram's EdgeEffect behind its bottom panel (80 pt tall, the ramp
+/// finishing 50 pt from the edge, panel color at 0.8 alpha).
+final class BottomEdgeFadeView: UIView {
+
+    private let ramp = CAGradientLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = UIColor.systemBackground.withAlphaComponent(0.8)
+        ramp.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+        ramp.locations = [0, 0.62]
+        layer.mask = ramp
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        ramp.frame = bounds
+        CATransaction.commit()
     }
 }
