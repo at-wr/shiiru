@@ -85,6 +85,37 @@ final class StickerSyncEngine: ObservableObject {
         }
     }
 
+    /// Stops in-flight syncs without touching what is already synced —
+    /// used when background execution time runs out. Interrupted refreshes
+    /// keep their existing copy via `rollBack`.
+    func cancelActiveSyncs() {
+        tasks.values.forEach { $0.cancel() }
+    }
+
+    /// Waits for the sync queue to drain (used by background maintenance).
+    func waitUntilIdle() async {
+        while !tasks.isEmpty, !Task.isCancelled {
+            _ = await syncChain?.value
+            await Task.yield()
+        }
+    }
+
+    /// Cleans up an interrupted or failed sync. A pack that already has a
+    /// good synced copy (this was a refresh) keeps it — only the partial
+    /// output directory is deleted; a first-time sync is removed entirely.
+    /// Returns true when an existing copy was preserved.
+    @discardableResult
+    private func rollBack(key: String, partialDirectory: String?) -> Bool {
+        if let partialDirectory { store.removeDirectory(named: partialDirectory) }
+        if store.syncedPackIDs().contains(key) {
+            phases[key] = .synced
+            return true
+        }
+        store.removePack(id: key)
+        phases[key] = .idle
+        return false
+    }
+
     /// Removes a pack that no longer exists on the Telegram side (deleted or
     /// archived there), so only the local copy is left to clean up.
     func removeLocalPack(id: String) {
@@ -189,12 +220,14 @@ final class StickerSyncEngine: ObservableObject {
     }
 
     private func syncGifs(key: String) async {
+        var partialDirectory: String?
         do {
             let animations = try await telegram.savedAnimations()
             guard !animations.isEmpty else { throw ShiiruError.conversionFailed }
 
             let syncToken = String(UUID().uuidString.prefix(6))
             let directoryName = "\(key)-\(syncToken)"
+            partialDirectory = directoryName
             let directory = try store.prepareDirectory(named: directoryName)
 
             for animation in animations {
@@ -226,23 +259,25 @@ final class StickerSyncEngine: ObservableObject {
                 isAnimated: true,
                 kind: "gif",
                 converterVersion: StickerConverter.pipelineVersion,
+                sourceCount: animations.count,
                 directory: directoryName,
                 stickers: manifestStickers
             ))
             phases[key] = .synced
             Haptics.success()
         } catch is CancellationError {
-            store.removePack(id: key)
-            phases[key] = .idle
+            rollBack(key: key, partialDirectory: partialDirectory)
         } catch {
-            store.removePack(id: key)
-            let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription
-            phases[key] = .failed(message: message)
-            Haptics.error()
+            if !rollBack(key: key, partialDirectory: partialDirectory) {
+                let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription
+                phases[key] = .failed(message: message)
+                Haptics.error()
+            }
         }
     }
 
     private func sync(info: StickerSetInfo, key: String) async {
+        var partialDirectory: String?
         do {
             let set = try await telegram.stickerSet(id: info.id)
             let stickers = set.stickers
@@ -250,6 +285,7 @@ final class StickerSyncEngine: ObservableObject {
 
             let syncToken = String(UUID().uuidString.prefix(6))
             let directoryName = "\(key)-\(syncToken)"
+            partialDirectory = directoryName
             let directory = try store.prepareDirectory(named: directoryName)
 
             for sticker in stickers {
@@ -280,19 +316,20 @@ final class StickerSyncEngine: ObservableObject {
                 isAnimated: stickers.contains { $0.format == .stickerFormatTgs },
                 kind: info.stickerType == .stickerTypeCustomEmoji ? "emoji" : "sticker",
                 converterVersion: StickerConverter.pipelineVersion,
+                sourceCount: stickers.count,
                 directory: directoryName,
                 stickers: manifestStickers
             ))
             phases[key] = .synced
             Haptics.success()
         } catch is CancellationError {
-            store.removePack(id: key)
-            phases[key] = .idle
+            rollBack(key: key, partialDirectory: partialDirectory)
         } catch {
-            store.removePack(id: key)
-            let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription
-            phases[key] = .failed(message: message)
-            Haptics.error()
+            if !rollBack(key: key, partialDirectory: partialDirectory) {
+                let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription
+                phases[key] = .failed(message: message)
+                Haptics.error()
+            }
         }
     }
 

@@ -7,6 +7,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         Theme.apply()
+        // BGProcessingTask handlers must register before launch finishes.
+        BackgroundMaintenance.register()
+        BackgroundMaintenance.schedule()
         return true
     }
 

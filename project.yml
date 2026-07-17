@@ -106,10 +106,15 @@ targets:
           - CFBundleURLName: dev.alany.shiiru
             CFBundleURLSchemes:
               - shiiru
-        # Continued-processing background task that keeps sticker syncs
-        # running after the user leaves the app (iOS 26+).
+        # dev.alany.shiiru.sync: continued-processing task that keeps a
+        # user-initiated sync running after the user leaves (iOS 26+).
+        # dev.alany.shiiru.maintenance: discretionary processing task that
+        # auto-syncs new/changed/stale packs with the app closed.
         BGTaskSchedulerPermittedIdentifiers:
           - dev.alany.shiiru.sync
+          - dev.alany.shiiru.maintenance
+        UIBackgroundModes:
+          - processing
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.alany.shiiru

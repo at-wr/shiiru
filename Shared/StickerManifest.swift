@@ -25,6 +25,9 @@ struct StickerManifest: Codable, Equatable {
         var kind: String? = nil
 
         var converterVersion: Int?
+        /// Telegram-side item count at sync time; drift means the pack
+        /// changed upstream and should be re-synced.
+        var sourceCount: Int? = nil
         /// On-disk directory; tokened per sync so Messages can never serve
         /// cached renders for stale URLs. Falls back to id for old manifests.
         var directory: String? = nil

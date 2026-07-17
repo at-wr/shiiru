@@ -15,4 +15,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
         window.makeKeyAndVisible()
     }
+
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        // Refresh the maintenance booking whenever the user leaves.
+        BackgroundMaintenance.schedule()
+    }
 }

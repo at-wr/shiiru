@@ -47,6 +47,14 @@ final class SharedStickerStore {
         }
     }
 
+    /// Deletes one on-disk directory (e.g. the partial output of an
+    /// interrupted sync) without touching the manifest.
+    func removeDirectory(named name: String) {
+        try? fileManager.removeItem(
+            at: AppGroup.stickersDirectory.appendingPathComponent(name, isDirectory: true)
+        )
+    }
+
     func removePack(id: String) {
         let directories = loadManifest().packs.filter { $0.id == id }.map(\.directoryName)
         mutateManifest { manifest in

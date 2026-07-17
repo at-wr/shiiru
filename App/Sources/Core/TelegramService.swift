@@ -167,6 +167,17 @@ final class TelegramService: ObservableObject {
         _ = try? await client.logOut()
     }
 
+    /// Waits for the stored session to authorize and the connection to come
+    /// up — used by background maintenance, where the app launches headless.
+    func waitUntilReady(timeout: TimeInterval) async -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline, !Task.isCancelled {
+            if authState == .ready, isConnected { return true }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+        return authState == .ready && isConnected
+    }
+
     func installedStickerSets() async throws -> [StickerSetInfo] {
         try await client.getInstalledStickerSets(stickerType: .stickerTypeRegular).sets
     }
