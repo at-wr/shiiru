@@ -159,6 +159,9 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             refreshOrphans(fetched: fetched, fetchedEmoji: fetchedEmoji)
             sync.prefetchCovers(for: sets)
             reconvertStalePacks()
+            // Author-side pack edits (stickers added/removed/reordered)
+            // apply on open too, not only in the nightly window.
+            BackgroundMaintenance.runCheck()
             tableView.reloadData()
             emptyStateView.isHidden = !sets.isEmpty
             if wasEmpty, !sets.isEmpty {

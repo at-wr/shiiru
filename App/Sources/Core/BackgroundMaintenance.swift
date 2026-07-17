@@ -22,7 +22,7 @@ enum BackgroundMaintenance {
 
     private static let log = Logger(subsystem: "dev.alany.shiiru", category: "Maintenance")
 
-    private static var running: Task<Void, Never>?
+    private static var current: Task<Void, Never>?
 
     /// Must run before the app finishes launching.
     static func register() {
@@ -53,12 +53,33 @@ enum BackgroundMaintenance {
     private static func handle(_ task: BGProcessingTask) {
         schedule() // keep the next window booked no matter how this one ends
 
-        guard !DemoSession.isActive, !PreviewMode.isActive else {
-            task.setTaskCompleted(success: true)
-            return
+        let work = runCheck()
+
+        task.expirationHandler = {
+            Task { @MainActor in
+                log.warning("maintenance window expired; stopping syncs")
+                work.cancel()
+                StickerSyncEngine.shared.cancelActiveSyncs()
+            }
         }
 
+        Task { @MainActor in
+            await work.value
+            task.setTaskCompleted(success: true)
+        }
+    }
+
+    /// Runs one drift check + repair pass. Single-flight: a check already in
+    /// progress is returned instead of starting another. Called from the
+    /// nightly BGProcessingTask, and from the app on foreground loads so
+    /// author-side pack edits apply the moment the user opens the app.
+    @discardableResult
+    static func runCheck() -> Task<Void, Never> {
+        if let current { return current }
         let work = Task { @MainActor in
+            defer { current = nil }
+
+            guard !DemoSession.isActive, !PreviewMode.isActive else { return }
             let telegram = TelegramService.shared
             guard await telegram.waitUntilReady(timeout: 30) else {
                 log.info("TDLib not ready (logged out or offline); skipping")
@@ -125,21 +146,8 @@ enum BackgroundMaintenance {
             await engine.waitUntilIdle()
             log.info("maintenance finished")
         }
-        running = work
-
-        task.expirationHandler = {
-            Task { @MainActor in
-                log.warning("maintenance window expired; stopping syncs")
-                running?.cancel()
-                StickerSyncEngine.shared.cancelActiveSyncs()
-            }
-        }
-
-        Task { @MainActor in
-            await work.value
-            running = nil
-            task.setTaskCompleted(success: true)
-        }
+        current = work
+        return work
     }
 }
 
