@@ -104,8 +104,24 @@ final class AcknowledgementsViewController: UITableViewController {
     }
 }
 
+/// License texts come pre-formatted to their own column width; re-wrapping
+/// them to the screen mangles the layout. The text view is made as wide as
+/// its longest line and keeps efficient vertical scrolling; an enclosing
+/// scroll view pans horizontally, so nothing ever wraps.
 final class TextPageViewController: UIViewController {
+    private static let font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
     private let text: String
+    private let scrollView = UIScrollView()
+    private let textView = UITextView()
+
+    /// Longest-line width; explicit newlines are the only breaks.
+    private lazy var unwrappedTextWidth: CGFloat = ceil((text as NSString).boundingRect(
+        with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin],
+        attributes: [.font: Self.font],
+        context: nil
+    ).width)
 
     init(title: String, text: String) {
         self.text = text
@@ -120,25 +136,33 @@ final class TextPageViewController: UIViewController {
         view.backgroundColor = .systemBackground
         navigationItem.largeTitleDisplayMode = .never
 
-        let textView = UITextView()
+        scrollView.showsHorizontalScrollIndicator = true
+        scrollView.isDirectionalLockEnabled = true
+        scrollView.contentInsetAdjustmentBehavior = .never
+        view.addSubview(scrollView)
+
         textView.text = text
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = Self.font
         textView.textColor = .label
         textView.isEditable = false
         textView.alwaysBounceVertical = true
-        // License texts come pre-formatted to their own column width;
-        // re-wrapping them to the screen mangles the layout. Keep the
-        // original line breaks and scroll horizontally instead.
-        textView.textContainer.widthTracksTextView = false
-        textView.textContainer.size = CGSize(
-            width: CGFloat.greatestFiniteMagnitude,
-            height: CGFloat.greatestFiniteMagnitude
-        )
-        textView.showsHorizontalScrollIndicator = false
+        textView.backgroundColor = .clear
         textView.textContainerInset = UIEdgeInsets(top: 20, left: 16, bottom: 32, right: 16)
-        textView.frame = view.bounds
-        textView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         textView.preferSoftTopEdge()
-        view.addSubview(textView)
+        scrollView.addSubview(textView)
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let topInset = view.safeAreaInsets.top
+        scrollView.frame = CGRect(
+            x: 0, y: topInset,
+            width: view.bounds.width, height: view.bounds.height - topInset
+        )
+        // Insets, line-fragment padding, and a little slack past the
+        // longest line.
+        let width = max(unwrappedTextWidth + 16 + 16 + 12, scrollView.bounds.width)
+        textView.frame = CGRect(x: 0, y: 0, width: width, height: scrollView.bounds.height)
+        scrollView.contentSize = CGSize(width: width, height: scrollView.bounds.height)
     }
 }
