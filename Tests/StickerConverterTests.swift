@@ -124,6 +124,18 @@ extension StickerConverterTests {
         XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
     }
 
+    /// The AVAssetReader path must produce an animated sticker from an MP4
+    /// saved animation with a single sequential decode pass.
+    func testVideoConvertsToAnimatedSticker() async throws {
+        let url = try fixtureURL("sample-video", "mp4")
+        let output = try await StickerConverter.convertVideo(at: url.path)
+
+        XCTAssertTrue(output.isAnimated)
+        XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(output.data as CFData, nil))
+        XCTAssertGreaterThan(CGImageSourceGetCount(source), 10, "2 s at 12 fps should keep most frames")
+    }
+
     /// Cancelling a sync must abort the conversion, not let it grind on —
     /// `detachedCancellable` forwards the caller's cancellation into the
     /// detached work, and the converter's checkpoints observe it.

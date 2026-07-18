@@ -367,7 +367,11 @@ enum StickerConverter {
         return try encodeFrameLadder(frames)
     }
 
-    /// MP4 saved animations: decode with AVFoundation, encode as APNG.
+    /// MP4 saved animations: decode sequentially with AVAssetReader — one
+    /// hardware decoder session for the whole clip — and encode as APNG.
+    /// The old AVAssetImageGenerator path opened a fresh decoder per
+    /// sampled frame (thousands of one-shot sessions per pack), which was
+    /// the dominant cost of a GIF sync.
     static func convertVideo(at path: String) async throws -> Output {
         let url = URL(fileURLWithPath: path)
         // AVFoundation wants a recognizable extension.
@@ -377,26 +381,87 @@ enum StickerConverter {
         }
         let asset = AVURLAsset(url: FileManager.default.fileExists(atPath: linked.path) ? linked : url)
         let seconds = min((try? await asset.load(.duration).seconds) ?? 3, 5)
-        guard seconds > 0 else { throw ShiiruError.conversionFailed }
+        guard seconds > 0,
+              let track = try? await asset.loadTracks(withMediaType: .video).first
+        else { throw ShiiruError.conversionFailed }
+        let transform = (try? await track.load(.preferredTransform)) ?? .identity
 
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        generator.maximumSize = CGSize(width: 512, height: 512)
+        let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = CMTimeRange(
+            start: .zero, duration: CMTime(seconds: seconds, preferredTimescale: 600)
+        )
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        ])
+        output.alwaysCopiesSampleData = false
+        reader.add(output)
+        guard reader.startReading() else { throw ShiiruError.conversionFailed }
 
-        let fps = 18.0
-        let frameCount = max(2, Int(seconds * fps))
-        let delay = seconds / Double(frameCount)
-        var frames: [(CGImage, Double)] = []
-        for index in 0..<frameCount {
+        let targetFPS = 18.0
+        var sampled: [(image: CGImage, time: Double)] = []
+        var nextTime = 0.0
+        while let sample = output.copyNextSampleBuffer() {
             try Task.checkCancellation()
-            let time = CMTime(seconds: Double(index) * delay, preferredTimescale: 600)
-            if let image = try? generator.copyCGImage(at: time, actualTime: nil) {
-                frames.append((image, delay))
-            }
+            let time = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            guard time >= nextTime else { continue }
+            nextTime = time + 1 / targetFPS
+            guard let buffer = CMSampleBufferGetImageBuffer(sample),
+                  let image = cgImage(from: buffer, transform: transform)
+            else { continue }
+            sampled.append((scale(image, toFit: 512) ?? image, time))
+        }
+        guard !sampled.isEmpty else { throw ShiiruError.conversionFailed }
+        // Delays come from actual presentation times so sources slower than
+        // the sampling grid keep their pacing. (Sorted defensively: decoded
+        // frames arrive in decode order, which differs from presentation
+        // order for streams with frame reordering.)
+        sampled.sort { $0.time < $1.time }
+        var frames: [(CGImage, Double)] = []
+        for (index, frame) in sampled.enumerated() {
+            let end = index + 1 < sampled.count ? sampled[index + 1].time : seconds
+            frames.append((frame.image, max(end - frame.time, 0.02)))
         }
         return try encodeFrameLadder(frames)
+    }
+
+    private static func cgImage(from buffer: CVPixelBuffer, transform: CGAffineTransform) -> CGImage? {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer),
+              let context = CGContext(
+                  data: base,
+                  width: CVPixelBufferGetWidth(buffer),
+                  height: CVPixelBufferGetHeight(buffer),
+                  bitsPerComponent: 8,
+                  bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                      | CGBitmapInfo.byteOrder32Little.rawValue
+              ),
+              let image = context.makeImage()
+        else { return nil }
+        return oriented(image, transform: transform)
+    }
+
+    /// Applies the track's preferredTransform the way
+    /// AVAssetImageGenerator's appliesPreferredTrackTransform did. Telegram
+    /// GIF MP4s are transcoded server-side and carry no rotation; this
+    /// covers the occasional camera-shot saved animation.
+    private static func oriented(_ image: CGImage, transform: CGAffineTransform) -> CGImage? {
+        guard transform != .identity else { return image }
+        let width = CGFloat(image.width), height = CGFloat(image.height)
+        let rect = CGRect(x: 0, y: 0, width: width, height: height).applying(transform)
+        guard let context = CGContext(
+            data: nil,
+            width: Int(rect.width.rounded()), height: Int(rect.height.rounded()),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return image }
+        context.translateBy(x: -rect.origin.x, y: -rect.origin.y)
+        context.concatenate(transform)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage() ?? image
     }
 
     /// Shared quality ladder over pre-decoded frames. Size-first attempts
