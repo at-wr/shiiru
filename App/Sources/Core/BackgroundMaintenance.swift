@@ -190,6 +190,10 @@ struct MaintenancePlan: Equatable {
         func needsRefresh(_ pack: StickerManifest.Pack, size: Int?) -> Bool {
             if (pack.converterVersion ?? 0) < pipelineVersion { return true }
             if let size, let source = pack.sourceCount, source != size { return true }
+            // Items skipped over transient failures (network drops, flood
+            // waits) leave the local copy short of its source; heal it on
+            // the next pass instead of shipping a forever-incomplete pack.
+            if let source = pack.sourceCount, pack.stickers.count < source { return true }
             return false
         }
 

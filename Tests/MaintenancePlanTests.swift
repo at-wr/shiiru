@@ -10,17 +10,38 @@ final class MaintenancePlanTests: XCTestCase {
         kind: String = "sticker",
         converter: Int = 10,
         sourceCount: Int? = 12,
-        sourceHash: String? = nil
+        sourceHash: String? = nil,
+        convertedCount: Int? = nil
     ) -> StickerManifest.Pack {
-        StickerManifest.Pack(
+        // A healthy pack converted every source item; tests for the
+        // incomplete-pack heal pass a smaller convertedCount explicitly.
+        let count = convertedCount ?? sourceCount ?? 1
+        return StickerManifest.Pack(
             id: id, name: id, title: id,
             isAnimated: false,
             kind: kind,
             converterVersion: converter,
             sourceCount: sourceCount,
             sourceHash: sourceHash,
-            stickers: [.init(fileName: "0.png", emoji: "😀", isAnimated: false)]
+            stickers: (0..<max(count, 1)).map {
+                .init(fileName: "\($0).png", emoji: "😀", isAnimated: false)
+            }
         )
+    }
+
+    /// A pack that lost items to transient failures (network drop mid-sync
+    /// skipped them) must be re-synced even though the Telegram-side count
+    /// and fingerprint look unchanged.
+    func testIncompletePackTriggersResync() {
+        let plan = MaintenancePlan.compute(
+            manifest: manifest([pack("1", convertedCount: 9)]),
+            installed: [.init(id: "1", size: 12)],
+            emoji: [],
+            knownPackIDs: ["1"],
+            autoAddNewPacks: true,
+            pipelineVersion: pipeline
+        )
+        XCTAssertEqual(plan.stickerSetIDs, ["1"])
     }
 
     private func manifest(_ packs: [StickerManifest.Pack]) -> StickerManifest {

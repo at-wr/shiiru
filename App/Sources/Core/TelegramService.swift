@@ -228,17 +228,58 @@ final class TelegramService: ObservableObject {
         )
     }
 
+    /// Downloads with a bounded, connectivity-aware retry: a transient
+    /// TDLib error (flood wait, dropped connection) shouldn't cost the
+    /// sticker its slot in the pack — or a background continued task its
+    /// life. Persistent failures still surface after the last attempt.
     func download(file: File) async throws -> String {
+        var lastError: Swift.Error = ShiiruError.downloadFailed
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try await Task.sleep(nanoseconds: UInt64(1 << (attempt + 1)) * 1_000_000_000)
+                await waitForConnection(timeout: 60)
+                NSLog("[Shiiru] retrying download for file %d (attempt %d)", file.id, attempt + 1)
+            }
+            do {
+                return try await downloadOnce(file: file)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
+    }
+
+    /// Polls the connection state so a retry isn't burned while the radio
+    /// is still down; gives up after `timeout` and lets the attempt decide.
+    private func waitForConnection(timeout: TimeInterval) async {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while Date() < deadline, !Task.isCancelled, !isConnected {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    private func downloadOnce(file: File) async throws -> String {
         if file.local.isDownloadingCompleted, !file.local.path.isEmpty {
             return file.local.path
         }
-        let downloaded = try await client.downloadFile(
-            fileId: file.id,
-            limit: 0,
-            offset: 0,
-            priority: 32,
-            synchronous: true
-        )
+        try Task.checkCancellation()
+        // TDLibKit's continuation ignores Swift cancellation; asking TDLib
+        // to drop the transfer makes the synchronous request come back so a
+        // cancelled sync isn't stuck behind a large file.
+        let downloaded = try await withTaskCancellationHandler {
+            try await client.downloadFile(
+                fileId: file.id,
+                limit: 0,
+                offset: 0,
+                priority: 32,
+                synchronous: true
+            )
+        } onCancel: { [client] in
+            Task { _ = try? await client.cancelDownloadFile(fileId: file.id, onlyIfPending: false) }
+        }
+        try Task.checkCancellation()
         guard downloaded.local.isDownloadingCompleted, !downloaded.local.path.isEmpty else {
             NSLog("[Shiiru] download incomplete for file %d", file.id)
             throw ShiiruError.downloadFailed

@@ -57,6 +57,11 @@ final class SyncBackgroundSession {
     private var heartbeat: Timer?
     private var realUnits: Int64 = 0
     private var nudgeUnits: Int64 = 0
+    /// Ticks spent waiting out a network drop; paces the slower offline
+    /// nudge cadence.
+    private var offlineTicks = 0
+    /// Non-nil while the pill is retitled to the waiting-for-network state.
+    private var offlineSince: Date?
 
     private init() {}
 
@@ -132,17 +137,45 @@ final class SyncBackgroundSession {
         heartbeat?.invalidate()
         heartbeat = nil
         nudgeUnits = 0
+        offlineTicks = 0
+        offlineSince = nil
     }
 
     private func heartbeatTick() {
         guard #available(iOS 26.0, *), syncing,
-              let task = continuedTask as? BGContinuedProcessingTask,
-              // Budget sized for the background duty-cycle pauses between
-              // conversions (up to 45 s), which stretch the gap between
-              // real progress ticks.
-              nudgeUnits < 40
+              let task = continuedTask as? BGContinuedProcessingTask
         else { return }
-        nudgeUnits += 1
+        if TelegramService.shared.isConnected {
+            if offlineSince != nil {
+                // Back online: restore the real title and let downloads
+                // (which TDLib kept queued) drive progress again.
+                offlineSince = nil
+                offlineTicks = 0
+                publishProgress()
+            }
+            // Budget sized for the background duty-cycle pauses between
+            // conversions (up to 45 s), which stretch the gap between
+            // real progress ticks.
+            guard nudgeUnits < 40 else { return }
+            nudgeUnits += 1
+        } else {
+            // A network drop stalls real progress through no fault of the
+            // sync. Stalling the bar would get the task expired by the
+            // system within minutes, so keep it visibly alive — slower,
+            // and honestly retitled. A genuinely long outage still ends in
+            // the expiry checkpoint, which resumes next foreground.
+            if offlineSince == nil {
+                offlineSince = Date()
+                Self.trace("network down; holding continued task alive")
+                task.updateTitle(
+                    String(localized: "Waiting for network…"),
+                    subtitle: String(localized: "Sync continues when you're back online")
+                )
+            }
+            offlineTicks += 1
+            guard offlineTicks % 3 == 0, nudgeUnits < 100 else { return }
+            nudgeUnits += 1
+        }
         task.progress.completedUnitCount = min(
             realUnits + nudgeUnits, task.progress.totalUnitCount - 1
         )
