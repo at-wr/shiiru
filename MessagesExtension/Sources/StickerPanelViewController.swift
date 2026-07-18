@@ -32,6 +32,10 @@ final class StickerPanelViewController: UIViewController {
 
     private var packs: [LoadedPack] = []
     private var selectedTabIndex = 0
+    /// Where each mode left off (pack tab + scroll position). Modes are
+    /// separate lists; carrying one's position into another used to leave
+    /// the highlight pill on an unrelated pack after a switch.
+    private var modeUIState: [Int: (tab: Int, offsetY: CGFloat)] = [:]
 
     private let tabHighlight: UIView = {
         let view = UIView()
@@ -173,9 +177,11 @@ final class StickerPanelViewController: UIViewController {
         settingsButton.addTarget(self, action: #selector(openApp), for: .touchUpInside)
 
         typeSwitcher.onSelect = { [weak self] tag in
-            guard let self else { return }
+            guard let self, tag != self.mode.rawValue else { return }
+            self.modeUIState[self.mode.rawValue] = (self.selectedTabIndex, self.grid.contentOffset.y)
             self.mode = Mode(rawValue: tag) ?? .stickers
             self.applyMode()
+            self.restoreModeState()
         }
 
         // The grid runs to the very bottom; the type switcher floats above
@@ -296,6 +302,8 @@ final class StickerPanelViewController: UIViewController {
             Mode.stickers.rawValue: all.filter { $0.pack.packKind == "sticker" },
             Mode.gifs.rawValue: all.filter { $0.pack.packKind == "gif" },
         ]
+        // Pack lists changed; remembered tabs and offsets no longer line up.
+        modeUIState.removeAll()
         // Only synced categories appear, in Telegram's pane order
         // (EntityKeyboard.swift appends gifs, stickers, emoji).
         let available: [(String, Int)] = [
@@ -377,8 +385,28 @@ final class StickerPanelViewController: UIViewController {
         grid.layoutIfNeeded()
         grid.setContentOffset(CGPoint(x: 0, y: -grid.adjustedContentInset.top), animated: false)
         if !packs.isEmpty {
+            // Keep the shared selection state in step with the reset —
+            // a stale index from the previous mode would park the highlight
+            // pill on an unrelated pack at the next layout pass.
+            tabBar.layoutIfNeeded()
+            setSelectedTab(0, animated: false)
             tabBar.selectItem(at: IndexPath(item: 0, section: 0), animated: false, scrollPosition: [])
         }
+    }
+
+    /// Returns the mode to wherever the user left it; a mode never visited
+    /// (or invalidated by a manifest reload) stays at the top.
+    private func restoreModeState() {
+        guard let saved = modeUIState[mode.rawValue], !packs.isEmpty else { return }
+        grid.layoutIfNeeded()
+        let inset = grid.adjustedContentInset
+        let minY = -inset.top
+        let maxY = max(minY, grid.contentSize.height + inset.bottom - grid.bounds.height)
+        grid.setContentOffset(CGPoint(x: 0, y: min(max(saved.offsetY, minY), maxY)), animated: false)
+        let tab = min(saved.tab, packs.count - 1)
+        tabBar.layoutIfNeeded()
+        setSelectedTab(tab, animated: false)
+        tabBar.selectItem(at: IndexPath(item: tab, section: 0), animated: false, scrollPosition: [])
     }
 
     @objc private func openApp() {

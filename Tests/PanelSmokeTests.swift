@@ -147,6 +147,41 @@ final class PanelSmokeTests: XCTestCase {
         snapshot("gif-mode")
     }
 
+    /// Each mode keeps its own place: leaving stickers scrolled mid-pack,
+    /// visiting emoji (which starts fresh at the top), and coming back must
+    /// land exactly where the user left off — not reset, and not carry one
+    /// mode's position into another.
+    func testModeSwitchRestoresPerModeScrollState() throws {
+        try installAllCategories()
+        // A short window guarantees the demo packs overflow the viewport —
+        // the restore behavior under test only exists with scrollable content.
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 280)
+        panel.reload()
+        panel.view.layoutIfNeeded()
+        pumpRunLoop(seconds: 1)
+
+        let inset = grid.adjustedContentInset
+        let maxOffset = grid.contentSize.height + inset.bottom - grid.bounds.height
+        guard maxOffset > 50 else { throw XCTSkip("demo content too short to scroll") }
+        let target = min(200, maxOffset)
+        grid.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+        pumpRunLoop(seconds: 0.3)
+
+        switcher.onSelect?(0) // emoji
+        pumpRunLoop(seconds: 0.5)
+        XCTAssertEqual(
+            grid.contentOffset.y, -grid.adjustedContentInset.top, accuracy: 1,
+            "a mode never visited starts at the top"
+        )
+
+        switcher.onSelect?(1) // back to stickers
+        pumpRunLoop(seconds: 0.5)
+        XCTAssertEqual(
+            grid.contentOffset.y, target, accuracy: 1,
+            "stickers mode must restore its own scroll position"
+        )
+    }
+
     func testEmptyStoreShowsEmptyState() {
         SharedStickerStore.shared.removeAll()
         panel.reload()
