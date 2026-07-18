@@ -91,11 +91,15 @@ enum BackgroundMaintenance {
 
             let manifest = SharedStickerStore.shared.loadManifest()
             // File probing off the main actor; only stale packs are read.
+            // The same hop sweeps directories orphaned by interrupted syncs
+            // and trims TDLib's download cache.
             let suspects = await Task.detached(priority: .utility) {
-                StickerAudit.suspectPackIDs(
+                SharedStickerStore.shared.sweepUnreferencedDirectories()
+                return StickerAudit.suspectPackIDs(
                     manifest: manifest, pipelineVersion: StickerConverter.pipelineVersion
                 )
             }.value
+            await telegram.trimFileCache()
             let plan = MaintenancePlan.compute(
                 manifest: manifest,
                 installed: installed.map { .init(id: String($0.id.rawValue), size: $0.size) },

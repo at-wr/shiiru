@@ -83,6 +83,38 @@ final class StickerAuditTests: XCTestCase {
         XCTAssertTrue(suspects.isEmpty, "audit is scoped to stale packs only")
     }
 
+    /// Orphaned directories (a sync killed between writing files and
+    /// publishing) are swept once they age past the safety window;
+    /// referenced and freshly-written directories are untouched.
+    func testSweepRemovesOnlyOldUnreferencedDirectories() throws {
+        try installPack(id: "kept", frames: 2, labeledAnimated: true)
+
+        let fileManager = FileManager.default
+        let oldOrphan = try store.prepareDirectory(named: "kept-stale1")
+        try Data("x".utf8).write(to: oldOrphan.appendingPathComponent("0.png"))
+        try fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -48 * 60 * 60)],
+            ofItemAtPath: oldOrphan.path
+        )
+        let freshOrphan = try store.prepareDirectory(named: "kept-fresh2")
+        try Data("x".utf8).write(to: freshOrphan.appendingPathComponent("0.png"))
+        // Age the referenced directory too, so only the manifest reference
+        // (not its recency) is what protects it.
+        try fileManager.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -48 * 60 * 60)],
+            ofItemAtPath: store.directoryURL(forPackID: "kept").path
+        )
+
+        store.sweepUnreferencedDirectories()
+
+        XCTAssertFalse(fileManager.fileExists(atPath: oldOrphan.path), "aged orphan is removed")
+        XCTAssertTrue(fileManager.fileExists(atPath: freshOrphan.path), "in-flight output survives")
+        XCTAssertTrue(
+            fileManager.fileExists(atPath: store.directoryURL(forPackID: "kept").path),
+            "referenced pack directory survives"
+        )
+    }
+
     func testStampMovesVersionWithoutTouchingFiles() throws {
         try installPack(id: "clean", frames: 4, labeledAnimated: true)
         let before = store.loadManifest().packs.first { $0.id == "clean" }

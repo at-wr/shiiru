@@ -86,6 +86,28 @@ final class SharedStickerStore {
         Set(loadManifest().packs.map(\.id))
     }
 
+    /// Deletes sticker directories no manifest pack references — leftovers
+    /// of syncs that died between writing files and publishing (crash,
+    /// jetsam). Only directories untouched for a day are removed, so an
+    /// in-flight sync's fresh output is never swept.
+    func sweepUnreferencedDirectories(olderThan age: TimeInterval = 24 * 60 * 60) {
+        let referenced = Set(loadManifest().packs.map(\.directoryName))
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: AppGroup.stickersDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]
+        ) else { return }
+        let cutoff = Date(timeIntervalSinceNow: -age)
+        for entry in entries {
+            guard let values = try? entry.resourceValues(
+                forKeys: [.contentModificationDateKey, .isDirectoryKey]
+            ), values.isDirectory == true,
+                  !referenced.contains(entry.lastPathComponent),
+                  let modified = values.contentModificationDate, modified < cutoff
+            else { continue }
+            try? fileManager.removeItem(at: entry)
+        }
+    }
+
     private func mutateManifest(_ mutate: (inout StickerManifest) -> Void) {
         queue.sync {
             var manifest = loadManifest()

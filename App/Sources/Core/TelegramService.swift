@@ -190,6 +190,24 @@ final class TelegramService: ObservableObject {
         _ = try? await client.logOut()
     }
 
+    /// Trims TDLib's download cache. Source files (webm/tgs/webp) are only
+    /// needed during conversion — converted output lives in the app group —
+    /// so anything unused for a week, or beyond 128 MB, can go; TDLib
+    /// re-downloads on demand.
+    func trimFileCache() async {
+        _ = try? await client.optimizeStorage(
+            chatIds: nil,
+            chatLimit: 0,
+            count: nil,
+            excludeChatIds: nil,
+            fileTypes: nil,
+            immunityDelay: 3600,
+            returnDeletedFileStatistics: false,
+            size: 128 << 20,
+            ttl: 7 * 24 * 60 * 60
+        )
+    }
+
     /// Waits for the stored session to authorize and the connection to come
     /// up — used by background maintenance, where the app launches headless.
     func waitUntilReady(timeout: TimeInterval) async -> Bool {
