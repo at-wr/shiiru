@@ -74,12 +74,6 @@ final class StickerSyncEngine: ObservableObject {
     private let thumbnailCache = NSCache<NSString, UIImage>()
     private let animationCache = NSCache<NSString, LottieAnimation>()
 
-    /// Cover downloads run on a few round-robin lanes: enough parallelism
-    /// that a long pack list fills promptly, bounded so cover fetches never
-    /// crowd out sticker downloads.
-    private var coverLanes: [Task<UIImage?, Never>?] = [nil, nil, nil, nil]
-    private var nextCoverLane = 0
-
     private var pendingCovers: [String: Task<UIImage?, Never>] = [:]
 
     private init() {
@@ -688,18 +682,18 @@ final class StickerSyncEngine: ObservableObject {
         let id = key as String
         if let pending = pendingCovers[id] { return await pending.value }
 
-        let lane = nextCoverLane
-        nextCoverLane = (nextCoverLane + 1) % coverLanes.count
-        let predecessor = coverLanes[lane]
+        // Every cover is its own task: TDLib's downloader already bounds
+        // and prioritizes the actual network work, and chaining requests
+        // here only adds head-of-line blocking — a slow cover used to hold
+        // up ready ones behind it, which is what made a fresh login's list
+        // fill so much worse than a refresh.
         let task = Task { [telegram, thumbnailCache] () -> UIImage? in
-            _ = await predecessor?.value
             guard let path = try? await telegram.download(file: file),
                   let image = UIImage(contentsOfFile: path)
             else { return nil }
             thumbnailCache.setObject(image, forKey: key)
             return image
         }
-        coverLanes[lane] = task
         pendingCovers[id] = task
         let image = await task.value
         pendingCovers[id] = nil
@@ -718,11 +712,19 @@ final class StickerSyncEngine: ObservableObject {
         return nil
     }
 
+    /// Warms cover artwork ahead of display: the first screenful downloads
+    /// fully at request priority (it's what the user stares at while the
+    /// list settles), the rest start in TDLib's downloader for later cells.
     func prefetchCovers(for sets: [StickerSetInfo]) {
         Task { [weak self] in
             guard let self else { return }
-            for info in sets {
-                if let file = Self.coverFile(for: info) {
+            for (index, info) in sets.enumerated() {
+                guard let file = Self.coverFile(for: info) else { continue }
+                if index < 12 {
+                    Task { [telegram = self.telegram] in
+                        _ = try? await telegram.download(file: file)
+                    }
+                } else {
                     try? await self.telegram.downloadFile(startingOnly: file)
                 }
             }

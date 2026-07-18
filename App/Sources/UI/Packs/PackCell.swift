@@ -154,15 +154,15 @@ final class PackCell: UITableViewCell {
         }
     }
 
-    func setThumbnail(_ image: UIImage?) {
+    /// `animated` marks covers arriving from a download mid-display — they
+    /// dissolve in instead of popping. Synchronous cache hits during
+    /// configure stay instant so rebuilt lists don't shimmer.
+    func setThumbnail(_ image: UIImage?, animated: Bool = false) {
         guard let image, animationView.animation == nil else { return }
         // Re-configures fire on every sync progress tick; only transition
         // when the image actually changes (covers are NSCache'd instances).
         guard thumbnailView.image !== image else { return }
-        // A cover landing in an empty cell (fresh configure from cache)
-        // paints instantly; the dissolve is only for swapping covers, so
-        // rebuilt lists don't shimmer.
-        guard thumbnailView.image != nil else {
+        guard animated || thumbnailView.image != nil else {
             thumbnailView.image = image
             return
         }

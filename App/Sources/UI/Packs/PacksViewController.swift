@@ -157,22 +157,30 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                 fetched = try await TelegramService.shared.installedStickerSets()
             }
             sets = arrange(fetched)
-            let fetchedEmoji = try? await TelegramService.shared.customEmojiSets()
+            // Paint after the first roundtrip: sticker packs are what the
+            // list opens on, and their covers start downloading (visible
+            // rows at full priority) before anything else is fetched.
+            sync.prefetchCovers(for: sets)
+            tableView.reloadData()
+            loadingSpinner.stopAnimating()
+            emptyStateView.isHidden = !sets.isEmpty
+            if wasEmpty, !sets.isEmpty {
+                animateFirstAppearance()
+            }
+
+            async let emojiFetch = TelegramService.shared.customEmojiSets()
+            async let animationsFetch = TelegramService.shared.savedAnimations()
+            let fetchedEmoji = try? await emojiFetch
             emojiSets = fetchedEmoji ?? []
-            let animations = (try? await TelegramService.shared.savedAnimations()) ?? []
+            let animations = (try? await animationsFetch) ?? []
             gifCount = animations.count
             gifCoverFile = animations.first?.thumbnail?.file
             refreshOrphans(fetched: fetched, fetchedEmoji: fetchedEmoji)
-            sync.prefetchCovers(for: sets)
             reconvertStalePacks()
             // Author-side pack edits (stickers added/removed/reordered)
             // apply on open too, not only in the nightly window.
             BackgroundMaintenance.runCheck()
             tableView.reloadData()
-            emptyStateView.isHidden = !sets.isEmpty
-            if wasEmpty, !sets.isEmpty {
-                animateFirstAppearance()
-            }
         } catch {
             let alert = UIAlertController(
                 title: "Couldn't Load Stickers",
@@ -361,7 +369,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                     }
                     if let path, let image = UIImage(contentsOfFile: path),
                        cell?.representedID == key {
-                        cell?.setThumbnail(image)
+                        cell?.setThumbnail(image, animated: true)
                     }
                 }
             }
@@ -389,7 +397,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             Task { [weak cell] in
                 let image = await Task.detached { UIImage(contentsOfFile: url.path) }.value
                 guard let image, cell?.representedID == pack.id else { return }
-                cell?.setThumbnail(image)
+                cell?.setThumbnail(image, animated: true)
             }
         }
     }
@@ -447,7 +455,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                     image = await StickerSyncEngine.shared.coverImage(for: info)
                 }
                 if let image, cell?.representedID == packID {
-                    cell?.setThumbnail(image)
+                    cell?.setThumbnail(image, animated: true)
                 }
             }
             if cachedAnimation == nil,
