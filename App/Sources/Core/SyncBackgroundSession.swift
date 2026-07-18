@@ -1,6 +1,8 @@
 import Foundation
 import UIKit
 import BackgroundTasks
+import Combine
+import os
 import os.log
 
 /// Keeps a sticker sync alive after the user leaves the app.
@@ -54,14 +56,20 @@ final class SyncBackgroundSession {
     /// a single dense sticker can take a while between real ticks (longer
     /// still at background QoS). The heartbeat inches the bar forward a few
     /// per-mille between real updates so activity stays visible.
-    private var heartbeat: Timer?
-    private var realUnits: Int64 = 0
-    private var nudgeUnits: Int64 = 0
-    /// Ticks spent waiting out a network drop; paces the slower offline
-    /// nudge cadence.
-    private var offlineTicks = 0
-    /// Non-nil while the pill is retitled to the waiting-for-network state.
-    private var offlineSince: Date?
+    ///
+    /// It runs as a strict dispatch timer on a background queue and writes
+    /// `Progress` (thread-safe) directly: main-runloop timers stall once
+    /// the device locks, and a field log showed dasd's Activity Progress
+    /// Policy expiring the task ~70 s after lock for exactly that reason.
+    private var heartbeatSource: DispatchSourceTimer?
+    /// Monotonic unit counter shared with the heartbeat thread; the
+    /// progress object rides along so ticks never touch the main actor.
+    private let pulse = OSAllocatedUnfairLock<(pulse: ProgressPulse, progress: Progress?)>(
+        initialState: (ProgressPulse(), nil)
+    )
+    private var connectivityWatch: AnyCancellable?
+    /// True while the pill is retitled to the waiting-for-network state.
+    private var offlineTitleShown = false
 
     private init() {
         // An expired or user-cancelled continued task never runs again on
@@ -142,58 +150,63 @@ final class SyncBackgroundSession {
     // MARK: - Heartbeat
 
     private func startHeartbeat() {
-        guard heartbeat == nil else { return }
-        heartbeat = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.heartbeatTick() }
+        guard heartbeatSource == nil else { return }
+        let source = DispatchSource.makeTimerSource(flags: .strict, queue: .global(qos: .utility))
+        source.schedule(deadline: .now() + 3, repeating: 3, leeway: .milliseconds(200))
+        source.setEventHandler { [pulse] in
+            pulse.withLock { state in
+                guard let progress = state.progress,
+                      let published = state.pulse.beat() else { return }
+                progress.completedUnitCount = published
+            }
         }
+        source.resume()
+        heartbeatSource = source
+
+        // Connectivity drives the heartbeat's pace and the pill's honesty:
+        // offline, real progress stalls through no fault of the sync, so
+        // the crawl slows (larger allowance, third cadence) and the title
+        // says why instead of looking stuck.
+        connectivityWatch = TelegramService.shared.$isConnected
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] connected in
+                self?.connectionChanged(connected)
+            }
     }
 
     private func stopHeartbeat() {
-        heartbeat?.invalidate()
-        heartbeat = nil
-        nudgeUnits = 0
-        offlineTicks = 0
-        offlineSince = nil
+        heartbeatSource?.cancel()
+        heartbeatSource = nil
+        connectivityWatch = nil
+        offlineTitleShown = false
+        pulse.withLock { state in
+            state.pulse.reset()
+            state.progress = nil
+        }
     }
 
-    private func heartbeatTick() {
+    private func connectionChanged(_ connected: Bool) {
         guard #available(iOS 26.0, *), syncing,
               let task = continuedTask as? BGContinuedProcessingTask
         else { return }
-        if TelegramService.shared.isConnected {
-            if offlineSince != nil {
-                // Back online: restore the real title and let downloads
-                // (which TDLib kept queued) drive progress again.
-                offlineSince = nil
-                offlineTicks = 0
+        pulse.withLock { state in
+            state.pulse.lead = connected ? 40 : 100
+            state.pulse.cadence = connected ? 1 : 3
+        }
+        if connected {
+            if offlineTitleShown {
+                offlineTitleShown = false
                 publishProgress()
             }
-            // Budget sized for the background duty-cycle pauses between
-            // conversions (up to 45 s), which stretch the gap between
-            // real progress ticks.
-            guard nudgeUnits < 40 else { return }
-            nudgeUnits += 1
-        } else {
-            // A network drop stalls real progress through no fault of the
-            // sync. Stalling the bar would get the task expired by the
-            // system within minutes, so keep it visibly alive — slower,
-            // and honestly retitled. A genuinely long outage still ends in
-            // the expiry checkpoint, which resumes next foreground.
-            if offlineSince == nil {
-                offlineSince = Date()
-                Self.trace("network down; holding continued task alive")
-                task.updateTitle(
-                    String(localized: "Waiting for network…"),
-                    subtitle: String(localized: "Sync continues when you're back online")
-                )
-            }
-            offlineTicks += 1
-            guard offlineTicks % 3 == 0, nudgeUnits < 100 else { return }
-            nudgeUnits += 1
+        } else if !offlineTitleShown {
+            offlineTitleShown = true
+            Self.trace("network down; holding continued task alive")
+            task.updateTitle(
+                String(localized: "Waiting for network…"),
+                subtitle: String(localized: "Sync continues when you're back online")
+            )
         }
-        task.progress.completedUnitCount = min(
-            realUnits + nudgeUnits, task.progress.totalUnitCount - 1
-        )
     }
 
     // MARK: - Lifetime
@@ -303,10 +316,17 @@ final class SyncBackgroundSession {
         // single converted sticker in a 100-sticker pack is ~10 visible
         // units. Coarser scales rounded per-sticker progress to zero, the
         // system saw a stalled task, and expired it ("Sync Failed").
-        task.progress.totalUnitCount = Int64(max(totalPacks, 1)) * 1000
-        realUnits = Int64(((Double(finishedPacks) + min(currentFraction, 1)) * 1000).rounded())
-        nudgeUnits = 0
-        task.progress.completedUnitCount = realUnits
+        let total = Int64(max(totalPacks, 1)) * 1000
+        let real = Int64(((Double(finishedPacks) + min(currentFraction, 1)) * 1000).rounded())
+        let published = pulse.withLock { state in
+            state.progress = task.progress
+            return state.pulse.update(realUnits: real, totalUnits: total)
+        }
+        task.progress.totalUnitCount = total
+        // Published units are monotonic: synthetic heartbeat lead is never
+        // rewound when a real tick lands — the system's progress tracker
+        // treats regressions as an unhealthy task.
+        task.progress.completedUnitCount = published
         if let currentTitle {
             // Per-sticker detail so dense video packs visibly move; the
             // pack counter only matters when several are queued.
