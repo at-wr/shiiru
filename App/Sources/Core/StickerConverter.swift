@@ -11,7 +11,7 @@ enum StickerConverter {
 
     static let maxFileSize = 500_000
 
-    static let pipelineVersion = 10
+    static let pipelineVersion = 11
 
     /// Total decoded pixels across all frames the transcript renderer may
     /// hold at once. Sized so that even 90-frame stickers keep a canvas at
@@ -103,6 +103,7 @@ enum StickerConverter {
 
         var firstFrame: CGImage?
         while let attempt = plan {
+            try Task.checkCancellation()
             let frameCount = max(2, Int((duration * attempt.fps).rounded()))
             let delay = duration / Double(frameCount)
             let side = CGFloat(attempt.side)
@@ -133,7 +134,7 @@ enum StickerConverter {
                 )
             }).value
             if let data, data.count <= maxFileSize {
-                return .apng(data)
+                return labeledOutput(data)
             }
             plan = planner.next(measuredSize: data?.count)
         }
@@ -206,7 +207,7 @@ enum StickerConverter {
 
         var firstFrame: CGImage?
         while let attempt = plan {
-
+            try Task.checkCancellation()
             let count = min(decoded.count, max(2, Int((duration * attempt.fps).rounded())))
             let picked = (0..<count).map { decoded[$0 * decoded.count / count] }
             let delay = duration / Double(picked.count)
@@ -225,7 +226,7 @@ enum StickerConverter {
                 byteBudget: maxFileSize * 5 / 2
             )
             if let data, data.count <= maxFileSize {
-                return frames.count > 1 ? .apng(data) : .png(data)
+                return labeledOutput(data)
             }
             plan = planner.next(measuredSize: data?.count)
         }
@@ -237,6 +238,7 @@ enum StickerConverter {
         let lastStands = profile.lastStands
         var standIndex = 0
         while standIndex < lastStands.count {
+            try Task.checkCancellation()
             let stand = lastStands[standIndex]
             let count = min(decoded.count, max(2, Int((duration * stand.fps).rounded())))
             let picked = (0..<count).map { decoded[$0 * decoded.count / count] }
@@ -256,7 +258,7 @@ enum StickerConverter {
                 maxColors: stand.colors
             )
             if let data, data.count <= maxFileSize {
-                return .apng(data)
+                return labeledOutput(data)
             }
             let overshoot = data.map { Double($0.count) / Double(maxFileSize) } ?? 3
             standIndex += overshoot > 2 ? 2 : 1
@@ -300,6 +302,18 @@ enum StickerConverter {
         }
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
+    }
+
+    /// Labels encoded output by what the encoder actually wrote, not by the
+    /// frame count that went in: APNGEncoder merges frames that quantize
+    /// identically, so a subtle animation can collapse to a single frame.
+    /// Marking that file animated leaves the panel waiting on frames that
+    /// don't exist.
+    private static func labeledOutput(_ data: Data) -> Output {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 1
+        else { return .png(data) }
+        return .apng(data)
     }
 
     static func scale(_ image: CGImage, toFit side: Int, exact: Bool = false) -> CGImage? {
@@ -376,6 +390,7 @@ enum StickerConverter {
         let delay = seconds / Double(frameCount)
         var frames: [(CGImage, Double)] = []
         for index in 0..<frameCount {
+            try Task.checkCancellation()
             let time = CMTime(seconds: Double(index) * delay, preferredTimescale: 600)
             if let image = try? generator.copyCGImage(at: time, actualTime: nil) {
                 frames.append((image, delay))
@@ -384,16 +399,26 @@ enum StickerConverter {
         return try encodeFrameLadder(frames)
     }
 
-    /// Shared quality ladder over pre-decoded frames.
+    /// Shared quality ladder over pre-decoded frames. Size-first attempts
+    /// keep the full palette; the emergency tiers then trade color depth
+    /// away, because any animation beats a static fallback (dense
+    /// photographic GIFs never fit 500 KB at 256 colors).
     private static func encodeFrameLadder(_ source: [(CGImage, Double)]) throws -> Output {
         guard !source.isEmpty else { throw ShiiruError.conversionFailed }
-        let attempts: [(side: Int, maxFrames: Int)] = [
-            (448, 60), (408, 45), (384, 36), (352, 27), (320, 20), (320, 14)
+        let attempts: [(side: Int, maxFrames: Int, colors: Int)] = [
+            (448, 60, 256), (408, 45, 256), (384, 36, 256), (352, 27, 256),
+            (320, 20, 256), (320, 14, 256),
+            (320, 14, 128), (320, 12, 96), (288, 12, 64),
+            (256, 10, 48), (224, 8, 48),
         ]
         let totalDuration = source.reduce(0) { $0 + $1.1 }
         var firstFrame: CGImage?
         for attempt in attempts {
-            let step = max(1, source.count / attempt.maxFrames)
+            try Task.checkCancellation()
+            // Round the sampling step up: dividing down lets a 40-frame
+            // source keep 20 frames on a 14-frame rung, making the rung a
+            // repeat of the previous one instead of a smaller attempt.
+            let step = max(1, (source.count + attempt.maxFrames - 1) / attempt.maxFrames)
             let picked = stride(from: 0, to: source.count, by: step).map { source[$0] }
             let delay = totalDuration / Double(picked.count)
             let frames: [APNGEncoder.Frame] = picked.compactMap { frame, _ in
@@ -406,9 +431,10 @@ enum StickerConverter {
                 frames: frames,
                 width: first.image.width,
                 height: first.image.height,
-                byteBudget: maxFileSize
+                byteBudget: maxFileSize,
+                maxColors: attempt.colors
             ), data.count <= maxFileSize {
-                return frames.count > 1 ? .apng(data) : .png(data)
+                return labeledOutput(data)
             }
         }
         if let first = firstFrame,

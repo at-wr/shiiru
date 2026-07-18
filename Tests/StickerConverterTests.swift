@@ -1,5 +1,6 @@
 import XCTest
 import ImageIO
+import UniformTypeIdentifiers
 @testable import Shiiru
 
 final class StickerConverterTests: XCTestCase {
@@ -82,5 +83,113 @@ extension StickerConverterTests {
         XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
         let source = try XCTUnwrap(CGImageSourceCreateWithData(output.data as CFData, nil))
         XCTAssertGreaterThan(CGImageSourceGetCount(source), 1, "animation should survive conversion")
+    }
+
+    func testWebmVP8DecodesAndConverts() throws {
+        let url = try fixtureURL("sample-vp8", "webm")
+        let frames = try XCTUnwrap(
+            WebmStickerDecoder.decodeFrames(atPath: url.path, maxFrames: 30),
+            "libvpx should decode the VP8 fixture"
+        )
+        XCTAssertGreaterThan(frames.count, 1)
+
+        let output = try StickerConverter.convertWebm(at: url.path)
+        XCTAssertTrue(output.isAnimated)
+        XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
+    }
+
+    /// A webm whose frames all quantize identically collapses to one frame
+    /// in the encoder; the output must be labeled by what was written, not
+    /// by the frame count that went in — the panel trusts `isAnimated`.
+    func testStaticContentWebmIsLabeledStatic() throws {
+        let url = try fixtureURL("sample-static", "webm")
+        let output = try StickerConverter.convertWebm(at: url.path)
+
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(output.data as CFData, nil))
+        XCTAssertEqual(CGImageSourceGetCount(source), 1, "solid-color content collapses to one frame")
+        XCTAssertFalse(output.isAnimated, "single-frame output must not claim to be animated")
+    }
+
+    /// Photographic GIFs above the pass-through budget used to exhaust the
+    /// full-palette ladder and fall back to a static first frame; the
+    /// color-reduction tiers must keep them moving.
+    func testOversizedNoisyGIFKeepsAnimation() throws {
+        let url = try makeNoisyGIF(side: 400, frameCount: 30)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let input = try Data(contentsOf: url)
+        XCTAssertGreaterThan(input.count, StickerConverter.maxFileSize, "fixture must exceed pass-through budget")
+
+        let output = try StickerConverter.convertAnimatedImage(at: url.path)
+        XCTAssertTrue(output.isAnimated, "re-encode must keep the animation alive")
+        XCTAssertLessThanOrEqual(output.data.count, StickerConverter.maxFileSize)
+    }
+
+    /// Cancelling a sync must abort the conversion, not let it grind on —
+    /// `detachedCancellable` forwards the caller's cancellation into the
+    /// detached work, and the converter's checkpoints observe it.
+    func testCancelledConversionThrows() async throws {
+        let url = try fixtureURL("sample", "webm")
+        let parent = Task.detached { () -> Bool in
+            while !Task.isCancelled { await Task.yield() }
+            do {
+                _ = try await detachedCancellable {
+                    try StickerConverter.convertWebm(at: url.path)
+                }
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        parent.cancel()
+        let sawCancellation = await parent.value
+        XCTAssertTrue(sawCancellation, "cancelled conversion must throw CancellationError")
+    }
+
+    /// Deterministic pseudo-noise frames: photographic-ish content that
+    /// compresses badly, guaranteeing the GIF exceeds the sticker budget.
+    private func makeNoisyGIF(side: Int, frameCount: Int) throws -> URL {
+        func makeFrame(seed: Int) -> CGImage {
+            let ctx = CGContext(
+                data: nil, width: side, height: side,
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )!
+            var state = UInt64(seed &* 2654435761 &+ 12345)
+            func rand() -> Double {
+                state = state &* 6364136223846793005 &+ 1442695040888963407
+                return Double((state >> 33) & 0xFFFF) / 65535.0
+            }
+            let block = 4
+            for y in stride(from: 0, to: side, by: block) {
+                for x in stride(from: 0, to: side, by: block) {
+                    let shade = 0.5 + (rand() - 0.5) * 0.9
+                        + 0.2 * sin((Double(x) + 8 * Double(seed)) / 23) * cos(Double(y) / 17)
+                    ctx.setFillColor(CGColor(
+                        srgbRed: min(1, max(0, shade)),
+                        green: min(1, max(0, shade * 0.9)),
+                        blue: min(1, max(0, 1 - shade)), alpha: 1
+                    ))
+                    ctx.fill(CGRect(x: x, y: y, width: block, height: block))
+                }
+            }
+            return ctx.makeImage()!
+        }
+
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("noisy-\(UUID().uuidString).gif")
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            url as CFURL, UTType.gif.identifier as CFString, frameCount, nil
+        ))
+        for seed in 0..<frameCount {
+            let properties = [
+                kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: 0.07]
+            ] as CFDictionary
+            CGImageDestinationAddImage(destination, makeFrame(seed: seed), properties)
+        }
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return url
     }
 }
