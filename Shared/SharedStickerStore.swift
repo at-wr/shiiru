@@ -67,6 +67,16 @@ final class SharedStickerStore {
         }
     }
 
+    /// Marks a pack as produced by the given pipeline version without
+    /// touching its files — used when an audit shows the existing output is
+    /// unaffected by a pipeline change.
+    func stamp(packID: String, converterVersion: Int) {
+        mutateManifest { manifest in
+            guard let index = manifest.packs.firstIndex(where: { $0.id == packID }) else { return }
+            manifest.packs[index].converterVersion = converterVersion
+        }
+    }
+
     func removeAll() {
         mutateManifest { $0.packs.removeAll() }
         try? fileManager.removeItem(at: AppGroup.stickersDirectory)

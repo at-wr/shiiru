@@ -90,6 +90,12 @@ enum BackgroundMaintenance {
             let animations = try? await telegram.savedAnimations()
 
             let manifest = SharedStickerStore.shared.loadManifest()
+            // File probing off the main actor; only stale packs are read.
+            let suspects = await Task.detached(priority: .utility) {
+                StickerAudit.suspectPackIDs(
+                    manifest: manifest, pipelineVersion: StickerConverter.pipelineVersion
+                )
+            }.value
             let plan = MaintenancePlan.compute(
                 manifest: manifest,
                 installed: installed.map { .init(id: String($0.id.rawValue), size: $0.size) },
@@ -97,6 +103,7 @@ enum BackgroundMaintenance {
                 knownPackIDs: Preferences.knownPackIDs,
                 autoAddNewPacks: Preferences.autoAddNewPacks,
                 pipelineVersion: StickerConverter.pipelineVersion,
+                suspectPackIDs: suspects,
                 gifCount: animations?.count,
                 gifHash: animations.map { SourceFingerprint.hash(of: $0.map(\.animation.remote.uniqueId)) }
             )
@@ -109,23 +116,40 @@ enum BackgroundMaintenance {
             // to catch one-removed-one-added edits.
             var stickerIDs = plan.stickerSetIDs
             var emojiIDs = plan.emojiSetIDs
-            let hashes = Dictionary(
-                uniqueKeysWithValues: manifest.packs.compactMap { pack in
-                    pack.sourceHash.map { (pack.id, $0) }
-                }
-            )
+            let packsByID = Dictionary(uniqueKeysWithValues: manifest.packs.map { ($0.id, $0) })
             for info in installed + emoji {
                 let id = String(info.id.rawValue)
                 let isSticker = plan.verifyStickerIDs.contains(id)
                 guard isSticker || plan.verifyEmojiIDs.contains(id),
-                      let expected = hashes[id],
+                      let pack = packsByID[id],
+                      let expected = pack.sourceHash,
                       !Task.isCancelled,
                       let set = try? await telegram.stickerSet(id: info.id)
                 else { continue }
                 let actual = SourceFingerprint.hash(of: set.stickers.map(\.sticker.remote.uniqueId))
-                if actual != expected {
+                var drifted = actual != expected
+                // Restamp candidates get one source-side check the local
+                // audit can't do: a webm source that ended up static is the
+                // old VP8/decode-failure fallback and needs the new decoder.
+                if !drifted, plan.restampIDs.contains(id),
+                   MaintenancePlan.conversionDegraded(
+                       sourceIsVideo: set.stickers.map { $0.format == .stickerFormatWebm },
+                       localIsAnimated: pack.stickers.map(\.isAnimated)
+                   ) {
+                    drifted = true
+                }
+                if drifted {
                     if isSticker { stickerIDs.insert(id) } else { emojiIDs.insert(id) }
                 }
+            }
+            // Clean stale packs keep their files; only the version stamp
+            // moves, so the next pass stops auditing them.
+            for id in plan.restampIDs
+            where !stickerIDs.contains(id) && !emojiIDs.contains(id)
+                && !(id == StickerSyncEngine.gifsPackID && plan.resyncGifs) {
+                SharedStickerStore.shared.stamp(
+                    packID: id, converterVersion: StickerConverter.pipelineVersion
+                )
             }
             guard !stickerIDs.isEmpty || !emojiIDs.isEmpty || plan.resyncGifs else {
                 log.info("verified: no content drift")
@@ -168,10 +192,15 @@ struct MaintenancePlan: Equatable {
     /// the stored sourceHash before deciding.
     var verifyStickerIDs: Set<String> = []
     var verifyEmojiIDs: Set<String> = []
+    /// Packs stale only by pipeline version whose files passed the audit:
+    /// stamp the manifest to the current version instead of re-converting.
+    /// (Verification can still promote one to a re-sync first.)
+    var restampIDs: Set<String> = []
 
     var isEmpty: Bool {
         stickerSetIDs.isEmpty && emojiSetIDs.isEmpty && !resyncGifs
             && verifyStickerIDs.isEmpty && verifyEmojiIDs.isEmpty
+            && restampIDs.isEmpty
     }
 
     static func compute(
@@ -181,6 +210,7 @@ struct MaintenancePlan: Equatable {
         knownPackIDs: Set<String>,
         autoAddNewPacks: Bool,
         pipelineVersion: Int,
+        suspectPackIDs: Set<String> = [],
         gifCount: Int? = nil,
         gifHash: String? = nil
     ) -> MaintenancePlan {
@@ -188,21 +218,29 @@ struct MaintenancePlan: Equatable {
         let packs = Dictionary(uniqueKeysWithValues: manifest.packs.map { ($0.id, $0) })
 
         func needsRefresh(_ pack: StickerManifest.Pack, size: Int?) -> Bool {
-            if (pack.converterVersion ?? 0) < pipelineVersion { return true }
             if let size, let source = pack.sourceCount, source != size { return true }
             // Items skipped over transient failures (network drops, flood
             // waits) leave the local copy short of its source; heal it on
             // the next pass instead of shipping a forever-incomplete pack.
             if let source = pack.sourceCount, pack.stickers.count < source { return true }
+            // A pipeline bump alone re-converts only packs whose files the
+            // audit flagged; the rest are restamped in place below.
+            if (pack.converterVersion ?? 0) < pipelineVersion,
+               suspectPackIDs.contains(pack.id) { return true }
             return false
+        }
+
+        func isStale(_ pack: StickerManifest.Pack) -> Bool {
+            (pack.converterVersion ?? 0) < pipelineVersion
         }
 
         for set in installed {
             if let pack = packs[set.id] {
                 if needsRefresh(pack, size: set.size) {
                     plan.stickerSetIDs.insert(set.id)
-                } else if pack.sourceHash != nil {
-                    plan.verifyStickerIDs.insert(set.id)
+                } else {
+                    if isStale(pack) { plan.restampIDs.insert(set.id) }
+                    if pack.sourceHash != nil { plan.verifyStickerIDs.insert(set.id) }
                 }
             } else if autoAddNewPacks, !knownPackIDs.contains(set.id) {
                 // Genuinely new on the Telegram side; auto-add mirrors the
@@ -219,8 +257,9 @@ struct MaintenancePlan: Equatable {
             guard let pack = packs[set.id] else { continue }
             if needsRefresh(pack, size: set.size) {
                 plan.emojiSetIDs.insert(set.id)
-            } else if pack.sourceHash != nil {
-                plan.verifyEmojiIDs.insert(set.id)
+            } else {
+                if isStale(pack) { plan.restampIDs.insert(set.id) }
+                if pack.sourceHash != nil { plan.verifyEmojiIDs.insert(set.id) }
             }
         }
         // Saved GIFs mirror the Telegram list, but an emptied list must not
@@ -230,8 +269,18 @@ struct MaintenancePlan: Equatable {
                 plan.resyncGifs = true
             } else if let gifHash, let source = pack.sourceHash, gifHash != source {
                 plan.resyncGifs = true
+            } else if isStale(pack) {
+                plan.restampIDs.insert(pack.id)
             }
         }
         return plan
+    }
+
+    /// True when a source that must animate (webm video sticker) maps to a
+    /// static local file — the signature of the old VP8/decode-failure
+    /// fallback. Only meaningful for equal-length, order-preserved lists.
+    static func conversionDegraded(sourceIsVideo: [Bool], localIsAnimated: [Bool]) -> Bool {
+        guard sourceIsVideo.count == localIsAnimated.count else { return false }
+        return zip(sourceIsVideo, localIsAnimated).contains { $0 && !$1 }
     }
 }

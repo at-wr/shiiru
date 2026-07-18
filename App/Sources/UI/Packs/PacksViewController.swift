@@ -202,19 +202,29 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     }
 
     private func reconvertStalePacks() {
-        let staleIDs = Set(
-            SharedStickerStore.shared.loadManifest().packs
-                .filter { ($0.converterVersion ?? 0) < StickerConverter.pipelineVersion }
-                .map(\.id)
-        )
-        guard !staleIDs.isEmpty else { return }
-        for info in sets + emojiSets where staleIDs.contains(String(info.id.rawValue)) {
-            if sync.phase(for: info.id) == .synced {
-                sync.setSyncEnabled(true, for: info, userInitiated: false)
+        let manifest = SharedStickerStore.shared.loadManifest()
+        guard manifest.packs.contains(where: {
+            ($0.converterVersion ?? 0) < StickerConverter.pipelineVersion
+        }) else { return }
+        Task { [weak self] in
+            // Only packs whose files the audit flags re-convert here; clean
+            // stale packs are restamped (or source-verified) by the
+            // maintenance pass that runs on the same foreground load.
+            let suspectIDs = await Task.detached(priority: .utility) {
+                StickerAudit.suspectPackIDs(
+                    manifest: manifest, pipelineVersion: StickerConverter.pipelineVersion
+                )
+            }.value
+            guard let self, !suspectIDs.isEmpty else { return }
+            for info in self.sets + self.emojiSets
+            where suspectIDs.contains(String(info.id.rawValue)) {
+                if self.sync.phase(for: info.id) == .synced {
+                    self.sync.setSyncEnabled(true, for: info, userInitiated: false)
+                }
             }
-        }
-        if staleIDs.contains(StickerSyncEngine.gifsPackID) {
-            sync.setGifSyncEnabled(true, userInitiated: false)
+            if suspectIDs.contains(StickerSyncEngine.gifsPackID) {
+                self.sync.setGifSyncEnabled(true, userInitiated: false)
+            }
         }
     }
 

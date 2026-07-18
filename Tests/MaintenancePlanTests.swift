@@ -86,17 +86,48 @@ final class MaintenancePlanTests: XCTestCase {
         }
     }
 
-    func testStalePipelineTriggersResync() {
+    func testStalePipelineResyncsOnlyAuditedSuspects() {
         let plan = MaintenancePlan.compute(
             manifest: manifest([pack("1", converter: 9), pack("2", kind: "emoji", converter: 9)]),
             installed: [.init(id: "1", size: 12)],
             emoji: [.init(id: "2", size: 12)],
             knownPackIDs: ["1", "2"],
             autoAddNewPacks: false,
+            pipelineVersion: pipeline,
+            suspectPackIDs: ["1"]
+        )
+        XCTAssertEqual(plan.stickerSetIDs, ["1"], "audited defect → re-convert")
+        XCTAssertTrue(plan.emojiSetIDs.isEmpty, "clean stale pack must not re-convert")
+        XCTAssertEqual(plan.restampIDs, ["2"], "clean stale pack is restamped in place")
+    }
+
+    func testStaleCleanPackStillVerifiesSourceSide() {
+        let plan = MaintenancePlan.compute(
+            manifest: manifest([pack("1", converter: 9, sourceHash: "abc")]),
+            installed: [.init(id: "1", size: 12)],
+            emoji: [],
+            knownPackIDs: ["1"],
+            autoAddNewPacks: false,
             pipelineVersion: pipeline
         )
-        XCTAssertEqual(plan.stickerSetIDs, ["1"])
-        XCTAssertEqual(plan.emojiSetIDs, ["2"])
+        XCTAssertTrue(plan.stickerSetIDs.isEmpty)
+        XCTAssertEqual(plan.restampIDs, ["1"])
+        XCTAssertEqual(
+            plan.verifyStickerIDs, ["1"],
+            "restamp candidates keep their fingerprint check — verification can promote them"
+        )
+    }
+
+    func testConversionDegradedFlagsStaticFromVideoSource() {
+        XCTAssertTrue(MaintenancePlan.conversionDegraded(
+            sourceIsVideo: [false, true, false], localIsAnimated: [false, false, true]
+        ), "webm source that landed static is the old VP8 fallback")
+        XCTAssertFalse(MaintenancePlan.conversionDegraded(
+            sourceIsVideo: [false, true], localIsAnimated: [false, true]
+        ))
+        XCTAssertFalse(MaintenancePlan.conversionDegraded(
+            sourceIsVideo: [true, true], localIsAnimated: [false]
+        ), "length mismatch means the mapping is unreliable; other rules handle it")
     }
 
     func testTelegramContentDriftTriggersResync() {
@@ -141,9 +172,20 @@ final class MaintenancePlanTests: XCTestCase {
             installed: [], emoji: [],
             knownPackIDs: [], autoAddNewPacks: false,
             pipelineVersion: pipeline,
+            suspectPackIDs: ["gifs"],
             gifCount: 3
         )
         XCTAssertTrue(stale.resyncGifs)
+
+        let staleButClean = MaintenancePlan.compute(
+            manifest: manifest([pack("gifs", kind: "gif", converter: 9, sourceCount: 3)]),
+            installed: [], emoji: [],
+            knownPackIDs: [], autoAddNewPacks: false,
+            pipelineVersion: pipeline,
+            gifCount: 3
+        )
+        XCTAssertFalse(staleButClean.resyncGifs)
+        XCTAssertEqual(staleButClean.restampIDs, ["gifs"])
 
         let drifted = MaintenancePlan.compute(
             manifest: manifest([pack("gifs", kind: "gif", sourceCount: 3)]),
