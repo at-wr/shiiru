@@ -71,6 +71,68 @@ final class PanelAnimationTests: XCTestCase {
         SharedStickerStore.shared.removeAll()
     }
 
+    /// The dense 8-column emoji grid shows far more cells than the old
+    /// 28-preview cap; with budget-based admission (and emoji-sized decode
+    /// costs) every visible animated cell must advance, not just the first
+    /// batch to claim a slot.
+    func testDenseEmojiGridAnimatesWallToWall() throws {
+        let store = SharedStickerStore.shared
+        store.removeAll()
+        DemoSession.installAllPacks()
+
+        // Harvest the demo Motion pack's animated APNGs, then rebuild the
+        // store around a single dense emoji pack so the panel opens
+        // directly in emoji mode.
+        let manifest = store.loadManifest()
+        let motion = try XCTUnwrap(manifest.packs.first { $0.id == "9102" })
+        let motionDir = AppGroup.stickersDirectory.appendingPathComponent("9102", isDirectory: true)
+        let animatedData: [Data] = try motion.stickers.filter(\.isAnimated).map {
+            try Data(contentsOf: motionDir.appendingPathComponent($0.fileName))
+        }
+        XCTAssertFalse(animatedData.isEmpty, "demo Motion pack must carry animated stickers")
+        store.removeAll()
+
+        let directory = try store.prepareDirectory(named: "9600")
+        var stickers: [StickerManifest.Sticker] = []
+        for index in 0..<64 {
+            let fileName = String(format: "emoji-%03d.png", index)
+            try animatedData[index % animatedData.count]
+                .write(to: directory.appendingPathComponent(fileName))
+            stickers.append(.init(fileName: fileName, emoji: "😀", isAnimated: true))
+        }
+        store.upsert(pack: StickerManifest.Pack(
+            id: "9600", name: "9600", title: "DENSE",
+            isAnimated: true,
+            kind: "emoji",
+            converterVersion: StickerConverter.pipelineVersion,
+            stickers: stickers
+        ))
+
+        let panel = StickerPanelViewController()
+        _ = panel.view
+        panel.reload()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 280))
+        window.rootViewController = panel
+        window.makeKeyAndVisible()
+        panel.view.layoutIfNeeded()
+        pumpRunLoop(seconds: 3.0)
+
+        let visible = previews(in: panel)
+        XCTAssertGreaterThan(
+            visible.count, 28,
+            "the dense grid must show more cells than the old animator cap"
+        )
+        let before = frameSignature(visible)
+        pumpRunLoop(seconds: 0.55) // off-period: the demo APNGs loop in exactly 1 s
+        let after = frameSignature(visible)
+        let frozen = zip(before, after).filter { $0 == $1 }.count
+        NSLog("[Repro] dense-emoji: \(visible.count) previews, \(frozen) frozen")
+        XCTAssertEqual(frozen, 0, "every visible emoji preview must animate")
+
+        window.isHidden = true
+        store.removeAll()
+    }
+
     func testTabJumpAnimates() throws {
         SharedStickerStore.shared.removeAll()
         // Many animated packs so a tab jump scrolls over several sections.

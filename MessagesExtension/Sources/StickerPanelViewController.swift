@@ -551,6 +551,10 @@ extension StickerPanelViewController: UICollectionViewDataSource, UICollectionVi
             description: item.description,
             animated: item.isAnimated,
             pixelSide: cellPointSide * UIScreen.main.scale,
+            // Playback frames at 2x read sharp in cells this small, and the
+            // saved bytes are what lets a dense emoji grid animate wall to
+            // wall; the static thumbnail above stays at full screen scale.
+            animationPixelSide: cellPointSide * 2,
             fillsCell: mode == .gifs,
             peelable: true
         )
@@ -717,11 +721,15 @@ final class StickerCell: UICollectionViewCell {
         description: String,
         animated: Bool,
         pixelSide: CGFloat,
+        animationPixelSide: CGFloat = StickerPreview.animationPixelSide,
         fillsCell: Bool,
         peelable: Bool
     ) {
         preview.contentModeFill = fillsCell
-        preview.configure(url: url, pixelSide: pixelSide, animated: animated)
+        preview.configure(
+            url: url, pixelSide: pixelSide, animated: animated,
+            animationPixelSide: animationPixelSide
+        )
 
         stickerView?.removeFromSuperview()
         stickerView = nil

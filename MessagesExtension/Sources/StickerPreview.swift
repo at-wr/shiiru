@@ -12,9 +12,16 @@ import ImageIO
 /// strategy Telegram's entity keyboard uses.
 enum StickerPreview {
 
-    /// Longest side, in pixels, for animation frames. Playback runs slightly
-    /// below cell resolution; the static thumbnail stays sharp at rest.
+    /// Ceiling, in pixels, for animation frame decode. Playback runs below
+    /// cell resolution (the static thumbnail stays sharp at rest); small
+    /// cells pass their own side so a 44 pt emoji doesn't pay for 160 px
+    /// frames it can't show.
     static let animationPixelSide: CGFloat = 160
+
+    /// Playback frame budget: Telegram video stickers decode to ~90 frames,
+    /// indistinguishable from 24 at panel cell sizes — and the frame buffer
+    /// is what the animation budget is spent on.
+    static let animationFrameCap = 24
 
     struct Animation {
         let frames: [CGImage]
@@ -46,11 +53,17 @@ enum StickerPreview {
         return cache
     }()
 
-    private static let animationCache: NSCache<NSURL, Box<Animation>> = {
-        let cache = NSCache<NSURL, Box<Animation>>()
+    private static let animationCache: NSCache<NSString, Box<Animation>> = {
+        let cache = NSCache<NSString, Box<Animation>>()
         cache.totalCostLimit = 32 << 20
         return cache
     }()
+
+    /// Cache key carries the decode size: the same sticker can be shown at
+    /// emoji and sticker resolutions in different modes.
+    private static func animationKey(_ url: URL, side: CGFloat) -> NSString {
+        "\(url.path)#\(Int(side))" as NSString
+    }
 
     final class Box<T> {
         let value: T
@@ -92,10 +105,18 @@ enum StickerPreview {
         }
     }
 
-    /// Decodes all frames of an animated sticker, down-sampled for playback.
-    /// Returns nil for static images.
-    static func animation(for url: URL, completion: @escaping (Animation?) -> Void) {
-        if let cached = animationCache.object(forKey: url as NSURL) {
+    /// Decodes an animated sticker for playback, down-sampled to `pixelSide`
+    /// and resampled to at most `animationFrameCap` frames (skipped frames
+    /// donate their display time to the survivor, so total duration and
+    /// pacing are preserved). Returns nil for static images.
+    static func animation(
+        for url: URL,
+        pixelSide: CGFloat = animationPixelSide,
+        completion: @escaping (Animation?) -> Void
+    ) {
+        let side = min(max(pixelSide, 32), animationPixelSide)
+        let key = animationKey(url, side: side)
+        if let cached = animationCache.object(forKey: key) {
             completion(cached.value)
             return
         }
@@ -112,21 +133,25 @@ enum StickerPreview {
             let options: [CFString: Any] = [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                 kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: animationPixelSide,
+                kCGImageSourceThumbnailMaxPixelSize: side,
                 kCGImageSourceShouldCacheImmediately: true,
             ]
+            var originalEnds: [Double] = []
+            originalEnds.reserveCapacity(count)
+            var total: Double = 0
+            for index in 0..<count {
+                total += frameDelay(source: source, index: index)
+                originalEnds.append(total)
+            }
+            let step = max(1, (count + animationFrameCap - 1) / animationFrameCap)
             var frames: [CGImage] = []
             var ends: [Double] = []
-            var total: Double = 0
-            frames.reserveCapacity(count)
-            ends.reserveCapacity(count)
-            for index in 0..<count {
+            for start in stride(from: 0, to: count, by: step) {
                 guard let cg = CGImageSourceCreateThumbnailAtIndex(
-                    source, index, options as CFDictionary
+                    source, start, options as CFDictionary
                 ) else { continue }
-                total += frameDelay(source: source, index: index)
                 frames.append(cg)
-                ends.append(total)
+                ends.append(originalEnds[min(start + step, count) - 1])
             }
             guard frames.count > 1, total > 0 else {
                 DispatchQueue.main.async { completion(nil) }
@@ -134,7 +159,7 @@ enum StickerPreview {
             }
             let animation = Animation(frames: frames, frameEnds: ends, duration: total)
             animationCache.setObject(
-                Box(animation), forKey: url as NSURL, cost: animation.cost
+                Box(animation), forKey: key, cost: animation.cost
             )
             DispatchQueue.main.async { completion(animation) }
         }
@@ -172,14 +197,23 @@ final class StickerAnimator {
     /// it, even with the animator sitting mostly idle.
     private let waiting = NSHashTable<StickerPreviewView>.weakObjects()
 
-    /// Playback capacity guard: beyond this many simultaneously animating
-    /// previews (dense emoji grids), extra cells stay on their static frame.
-    static let maxConcurrent = 28
+    /// Admission is budgeted by frame-buffer bytes, not by count: a 44 pt
+    /// emoji preview costs ~750 KB while a GIF-mosaic cell costs megabytes,
+    /// and a flat count sized for the expensive case left most of a dense
+    /// emoji grid frozen on its static frame. Within the budget the whole
+    /// grid animates; the count ceiling is only a CPU backstop.
+    static let budgetBytes = 40 << 20
+    static let maxConcurrent = 96
 
-    /// Claims an animation slot, or queues the view for revival when one
-    /// frees up.
-    func requestSlot(_ view: StickerPreviewView) -> Bool {
-        if views.count < Self.maxConcurrent {
+    private var spentBytes: Int {
+        views.allObjects.reduce(0) { $0 + $1.animationCost }
+    }
+
+    /// Claims an animation slot for `cost` bytes (estimated before decode,
+    /// exact after), or queues the view for revival when room frees up.
+    func requestSlot(_ view: StickerPreviewView, cost: Int) -> Bool {
+        if views.contains(view) { return true }
+        if views.count < Self.maxConcurrent, spentBytes + cost <= Self.budgetBytes {
             waiting.remove(view)
             return true
         }
@@ -205,8 +239,11 @@ final class StickerAnimator {
             displayLink?.invalidate()
             displayLink = nil
         }
-        // One slot freed → revive one waiter.
-        if held, let next = waiting.allObjects.first {
+        // Budget freed → give every waiter one shot at it; a cheap emoji
+        // slot opening admits several cheaper waiters at once, and any
+        // still-denied view just re-queues itself.
+        guard held else { return }
+        for next in waiting.allObjects {
             waiting.remove(next)
             next.resumeAnimationIfNeeded()
         }
@@ -230,6 +267,19 @@ final class StickerPreviewView: UIView {
     private var displayedFrame = -1
     private var wantsAnimation = false
     private var loadingAnimation = false
+    /// Decode side for playback frames; the cell passes its own size so
+    /// tiny emoji cells don't pay full-resolution costs.
+    private var animationPixelSide = StickerPreview.animationPixelSide
+
+    /// Live frame-buffer bytes this view holds — what it's charged against
+    /// the animator's budget while registered.
+    var animationCost: Int { animation?.cost ?? 0 }
+
+    /// Pre-decode admission estimate (side² × RGBA × frame cap).
+    private var estimatedAnimationCost: Int {
+        let side = Int(min(animationPixelSide, StickerPreview.animationPixelSide))
+        return side * side * 4 * StickerPreview.animationFrameCap
+    }
     /// True between resume and pause: the cell is on screen and should
     /// tick. Async decode completions must not register a preview whose
     /// cell went back to the reuse pool — pooled cells keep their window,
@@ -250,7 +300,13 @@ final class StickerPreviewView: UIView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(url: URL, pixelSide: CGFloat, animated: Bool) {
+    func configure(
+        url: URL,
+        pixelSide: CGFloat,
+        animated: Bool,
+        animationPixelSide: CGFloat = StickerPreview.animationPixelSide
+    ) {
+        self.animationPixelSide = animationPixelSide
         guard self.url != url else {
             wantsAnimation = animated
             if animated { resumeAnimationIfNeeded() }
@@ -272,20 +328,24 @@ final class StickerPreviewView: UIView {
     func resumeAnimationIfNeeded() {
         guard wantsAnimation, window != nil else { return }
         wantsTicks = true
-        guard animation == nil else {
+        if let animation {
+            guard StickerAnimator.shared.requestSlot(self, cost: animation.cost) else { return }
             StickerAnimator.shared.register(self)
             return
         }
         guard !loadingAnimation, let url,
-              StickerAnimator.shared.requestSlot(self) else { return }
+              StickerAnimator.shared.requestSlot(self, cost: estimatedAnimationCost) else { return }
         loadingAnimation = true
-        StickerPreview.animation(for: url) { [weak self] animation in
+        StickerPreview.animation(for: url, pixelSide: animationPixelSide) { [weak self] animation in
             guard let self else { return }
             self.loadingAnimation = false
             guard self.url == url, self.wantsTicks, self.window != nil, let animation else { return }
+            // Admission re-checked with the exact cost; a denied view keeps
+            // its frames in the shared cache only, so waiters never hold
+            // untracked memory while parked.
+            guard StickerAnimator.shared.requestSlot(self, cost: animation.cost) else { return }
             self.animation = animation
             if self.startTime == 0 { self.startTime = CACurrentMediaTime() }
-            guard StickerAnimator.shared.requestSlot(self) else { return }
             StickerAnimator.shared.register(self)
         }
     }
