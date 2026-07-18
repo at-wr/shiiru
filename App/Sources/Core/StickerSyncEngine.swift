@@ -690,7 +690,10 @@ final class StickerSyncEngine: ObservableObject {
         let setID = info.id
         let task = Task { [telegram, thumbnailCache] () -> UIImage? in
             do {
-                let path = try await telegram.download(file: file)
+                // Fail fast on the first attempt: if the reference is
+                // stale, repeating it just burns backoff time — the fresh
+                // fetch below is the actual remedy.
+                let path = try await telegram.download(file: file, attempts: 1)
                 guard let image = UIImage(contentsOfFile: path) else { return nil }
                 thumbnailCache.setObject(image, forKey: key)
                 return image

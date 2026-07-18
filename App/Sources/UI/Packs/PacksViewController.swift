@@ -308,21 +308,35 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     /// here re-fired cover loads and made thumbnails flash on every tick.
     private var coverBackfill: Task<Void, Never>?
 
-    /// Covers that failed their first attempt (stale file references right
-    /// after login, transient errors) converge without a manual refresh:
-    /// whatever is still missing gets re-requested on an exponential
-    /// backoff until the list is complete.
+    /// Covers that failed their first attempt converge without a manual
+    /// refresh. The pass does exactly what pull-to-refresh does — re-fetch
+    /// the lists so every row holds freshly minted file references (the
+    /// post-login ones go stale server-side) — and repeats on a backoff
+    /// until no pack is missing its cover, wherever it sits in the list.
     private func scheduleCoverBackfill() {
         guard coverBackfill == nil else { return }
         coverBackfill = Task { [weak self] in
             defer { self?.coverBackfill = nil }
-            for delay in [2.0, 4, 8, 16] {
+            for delay in [1.0, 2, 4, 8, 16] {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 guard let self, !Task.isCancelled else { return }
-                let missing = self.visibleSets.prefix(24).contains {
-                    StickerSyncEngine.shared.cachedCover(for: $0) == nil
+                let missingSticker = self.sets.contains {
+                    StickerSyncEngine.coverFile(for: $0) != nil
+                        && StickerSyncEngine.shared.cachedCover(for: $0) == nil
                 }
-                guard missing else { return }
+                let missingEmoji = self.emojiSets.contains {
+                    StickerSyncEngine.coverFile(for: $0) != nil
+                        && StickerSyncEngine.shared.cachedCover(for: $0) == nil
+                }
+                guard missingSticker || missingEmoji else { return }
+                if missingSticker,
+                   let fetched = try? await TelegramService.shared.installedStickerSets() {
+                    self.sets = self.arrange(fetched)
+                }
+                if missingEmoji,
+                   let fetchedEmoji = try? await TelegramService.shared.customEmojiSets() {
+                    self.emojiSets = fetchedEmoji
+                }
                 self.tableView.reloadData()
             }
         }

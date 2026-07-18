@@ -250,9 +250,11 @@ final class TelegramService: ObservableObject {
     /// TDLib error (flood wait, dropped connection) shouldn't cost the
     /// sticker its slot in the pack — or a background continued task its
     /// life. Persistent failures still surface after the last attempt.
-    func download(file: File) async throws -> String {
+    /// Callers with a better remedy than repetition (covers re-minting a
+    /// stale file reference) pass `attempts: 1` to fail fast instead.
+    func download(file: File, attempts: Int = 3) async throws -> String {
         var lastError: Swift.Error = ShiiruError.downloadFailed
-        for attempt in 0..<3 {
+        for attempt in 0..<max(attempts, 1) {
             if attempt > 0 {
                 try await Task.sleep(nanoseconds: UInt64(1 << (attempt + 1)) * 1_000_000_000)
                 await waitForConnection(timeout: 60)
