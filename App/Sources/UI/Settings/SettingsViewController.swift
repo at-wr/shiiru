@@ -89,7 +89,7 @@ final class SettingsViewController: UITableViewController {
             var phone = user.map { CountryCodes.formatInternational($0.phoneNumber) }
             var userID = user?.id
             if DemoSession.isActive {
-                (name, phone, userID) = ("App Review", DemoSession.displayPhone, 1145)
+                (name, phone, userID) = ("App Review", DemoSession.displayPhone, 1001)
             } else if PreviewMode.isActive, user == nil {
                 (name, phone, userID) = ("Utya Duck", CountryCodes.formatInternational("15550123456"), 9001)
             }

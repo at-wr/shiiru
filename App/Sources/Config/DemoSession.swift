@@ -4,8 +4,10 @@ import StickerCore
 
 enum DemoSession {
 
-    static let phoneDigits = "11145141919"
-    static let displayPhone = "+1 114 514 1919"
+    // Fictional 555-01xx number (reserved, never allocated) — documented
+    // in App Review notes as the demo login.
+    static let phoneDigits = "15555550100"
+    static let displayPhone = "+1 555 555 0100"
     static let changed = Notification.Name("ShiiruDemoSessionChanged")
 
     private static let flagKey = "demoSessionActive"
