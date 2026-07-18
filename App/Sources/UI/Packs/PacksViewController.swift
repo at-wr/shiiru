@@ -150,6 +150,10 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
                 PreviewMode.preparePreferences()
                 fetched = PreviewMode.sampleSets
             } else {
+                // Right after onboarding the session may still be settling;
+                // fetching through that window returns lists whose cover
+                // files aren't downloadable yet.
+                _ = await TelegramService.shared.waitUntilReady(timeout: 10)
                 fetched = try await TelegramService.shared.installedStickerSets()
             }
             sets = arrange(fetched)
@@ -350,8 +354,12 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             }
             if let file = gifCoverFile {
                 Task { [weak cell] in
-                    if let path = try? await TelegramService.shared.download(file: file),
-                       let image = UIImage(contentsOfFile: path),
+                    var path = try? await TelegramService.shared.download(file: file)
+                    if path == nil {
+                        try? await Task.sleep(nanoseconds: 4_000_000_000)
+                        path = try? await TelegramService.shared.download(file: file)
+                    }
+                    if let path, let image = UIImage(contentsOfFile: path),
                        cell?.representedID == key {
                         cell?.setThumbnail(image)
                     }
@@ -429,10 +437,18 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         if let cachedAnimation { cell.setAnimatedThumbnail(cachedAnimation) }
         guard cachedCover == nil || cachedAnimation == nil else { return }
         Task { [weak cell] in
-            if cachedCover == nil,
-               let image = await StickerSyncEngine.shared.coverImage(for: info),
-               cell?.representedID == packID {
-                cell?.setThumbnail(image)
+            if cachedCover == nil {
+                var image = await StickerSyncEngine.shared.coverImage(for: info)
+                if image == nil {
+                    // First-login covers can race TDLib settling into the
+                    // session; a delayed second attempt heals them without
+                    // waiting for a manual refresh.
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    image = await StickerSyncEngine.shared.coverImage(for: info)
+                }
+                if let image, cell?.representedID == packID {
+                    cell?.setThumbnail(image)
+                }
             }
             if cachedAnimation == nil,
                let animation = await StickerSyncEngine.shared.animatedCover(for: info),
