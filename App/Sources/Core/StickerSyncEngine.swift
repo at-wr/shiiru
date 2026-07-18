@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Combine
+import ImageIO
 import TDLibKit
 import Lottie
 
@@ -57,8 +58,12 @@ final class StickerSyncEngine: ObservableObject {
     }
 
     private var pendingSyncs: [PendingSync] = []
-    private var runningKey: String?
+    private var runningSync: PendingSync?
+    private var runningKey: String? { runningSync?.key }
     private var runner: Task<Void, Never>?
+    /// Set while the running pack is being cancelled to make way for
+    /// cheaper pending work; it re-queues instead of settling.
+    private var preempting = false
 
     private var queuedKeys: Set<String> {
         var keys = Set(pendingSyncs.map(\.key))
@@ -85,8 +90,9 @@ final class StickerSyncEngine: ObservableObject {
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.pendingSyncs.count > 1 else { return }
+                guard let self else { return }
                 self.pendingSyncs = Self.backgroundPriority(self.pendingSyncs)
+                self.preemptForBackgroundIfWorthIt()
             }
         }
     }
@@ -117,6 +123,9 @@ final class StickerSyncEngine: ObservableObject {
             })
         } else {
             dropPending(key: key)
+            // The user removed the pack; a background preemption in flight
+            // must not re-queue it.
+            if runningKey == key { preempting = false }
             tasks[key]?.cancel()
             tasks[key] = nil
             store.removePack(id: key)
@@ -147,16 +156,45 @@ final class StickerSyncEngine: ObservableObject {
         runner = Task { [weak self] in
             while let self, !self.pendingSyncs.isEmpty {
                 let next = self.pendingSyncs.removeFirst()
-                self.runningKey = next.key
+                self.runningSync = next
                 let work = Task { await next.run() }
                 self.tasks[next.key] = work
                 await work.value
                 self.tasks[next.key] = nil
-                self.runningKey = nil
-                self.noteSyncEnded(key: next.key)
+                self.runningSync = nil
+                if self.preempting {
+                    // Preempted for cheaper pending work: the checkpointed
+                    // partial keeps its progress, so slot the pack back by
+                    // cost. The pill's bookkeeping never saw it end.
+                    self.preempting = false
+                    self.phases[next.key] = .syncing(progress: 0)
+                    self.pendingSyncs.append(next)
+                    self.pendingSyncs = Self.backgroundPriority(self.pendingSyncs)
+                } else {
+                    self.noteSyncEnded(key: next.key)
+                }
             }
             self?.runner = nil
         }
+    }
+
+    /// Background windows close without warning and only finished packs
+    /// checkpoint durably — when something meaningfully cheaper is waiting
+    /// behind an expensive running pack, pausing the big one (its partial
+    /// output resumes later) lands more packs before the window ends.
+    static func shouldPreempt(running: PendingSync, pending: [PendingSync]) -> Bool {
+        let eligible = running.userInitiated ? pending.filter(\.userInitiated) : pending
+        guard let cheapest = eligible.map(\.estimatedCost).min() else { return false }
+        return running.estimatedCost > cheapest * 4
+    }
+
+    private func preemptForBackgroundIfWorthIt() {
+        guard !preempting, let running = runningSync,
+              Self.shouldPreempt(running: running, pending: pendingSyncs)
+        else { return }
+        NSLog("[Shiiru] preempting \(running.key) for cheaper pending packs")
+        preempting = true
+        tasks[running.key]?.cancel()
     }
 
     /// Removes a not-yet-started sync from the queue (toggle-off, engine
@@ -193,6 +231,34 @@ final class StickerSyncEngine: ObservableObject {
         while !Task.isCancelled, let current = runner {
             _ = await current.value
         }
+    }
+
+    /// Rebuilds manifest entries for items a previous, interrupted attempt
+    /// already converted into `directory`: file names carry the source
+    /// index and sync token, the extension distinguishes GIF pass-throughs,
+    /// and a frame probe restores `isAnimated` the same way conversion
+    /// labels it.
+    static func convertedEntries(
+        directory: URL, syncToken: String, emojis: [String]
+    ) -> [Int: StickerManifest.Sticker] {
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return [:] }
+        var entries: [Int: StickerManifest.Sticker] = [:]
+        for file in files {
+            let parts = file.split(separator: "-", maxSplits: 1)
+            guard parts.count == 2, let index = Int(parts[0]), index < emojis.count,
+                  parts[1].hasPrefix(syncToken)
+            else { continue }
+            let url = directory.appendingPathComponent(file)
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  CGImageSourceGetCount(source) >= 1
+            else { continue }
+            entries[index] = StickerManifest.Sticker(
+                fileName: file, emoji: emojis[index],
+                isAnimated: CGImageSourceGetCount(source) > 1
+            )
+        }
+        return entries
     }
 
     /// Cleans up an interrupted or failed sync. A pack that already has a
@@ -249,6 +315,9 @@ final class StickerSyncEngine: ObservableObject {
             })
         } else {
             dropPending(key: key)
+            // The user removed the pack; a background preemption in flight
+            // must not re-queue it.
+            if runningKey == key { preempting = false }
             tasks[key]?.cancel()
             tasks[key] = nil
             store.removePack(id: key)
@@ -272,18 +341,25 @@ final class StickerSyncEngine: ObservableObject {
         _ items: [Item],
         syncToken: String,
         directory: URL,
+        resumed: [Int: StickerManifest.Sticker] = [:],
         weight: (Item) -> Double = { _ in 1 },
         onProgress: @escaping @MainActor (_ completed: Int, _ total: Int, _ fraction: Double) -> Void,
         convert: @escaping @Sendable (Item) async throws -> (output: StickerConverter.Output, emoji: String)
     ) async throws -> [StickerManifest.Sticker] {
-        var results: [(index: Int, sticker: StickerManifest.Sticker)] = []
-        var completed = 0
+        // Items a checkpointed earlier attempt already converted enter the
+        // results directly and count as done for progress.
+        var results: [(index: Int, sticker: StickerManifest.Sticker)] =
+            resumed.map { (index: $0.key, sticker: $0.value) }
+        var completed = resumed.count
         // Progress is weighted by expected conversion cost — a video
         // sticker takes orders of magnitude longer than a static one, and
         // an equal-weight bar would sprint through the statics then stall.
         let weights = items.map(weight)
         let totalWeight = max(weights.reduce(0, +), 1)
-        var completedWeight = 0.0
+        var completedWeight = resumed.keys.reduce(0.0) { $0 + weights[$1] }
+        if !resumed.isEmpty {
+            onProgress(completed, items.count, completedWeight / totalWeight)
+        }
 
         try await withThrowingTaskGroup(
             of: (index: Int, sticker: StickerManifest.Sticker?, elapsed: Duration).self
@@ -298,6 +374,7 @@ final class StickerSyncEngine: ObservableObject {
                     (index: Int, sticker: StickerManifest.Sticker?, elapsed: Duration), any Swift.Error
                 >
             ) {
+                while next < items.count, resumed[next] != nil { next += 1 }
                 guard next < items.count else { return }
                 let index = next
                 let item = items[index]
@@ -356,19 +433,38 @@ final class StickerSyncEngine: ObservableObject {
         do {
             let animations = try await telegram.savedAnimations()
             guard !animations.isEmpty else { throw ShiiruError.conversionFailed }
+            let sourceHash = SourceFingerprint.hash(of: animations.map(\.animation.remote.uniqueId))
 
-            let syncToken = String(UUID().uuidString.prefix(6))
-            let directoryName = "\(key)-\(syncToken)"
+            let syncToken: String
+            let directoryName: String
+            let directory: URL
+            var resumed: [Int: StickerManifest.Sticker] = [:]
+            if let existing = store.resumableDirectory(forPackID: key, sourceHash: sourceHash) {
+                directoryName = existing
+                syncToken = String(existing.dropFirst(key.count + 1))
+                directory = AppGroup.stickersDirectory
+                    .appendingPathComponent(existing, isDirectory: true)
+                resumed = Self.convertedEntries(
+                    directory: directory, syncToken: syncToken,
+                    emojis: Array(repeating: "", count: animations.count)
+                )
+                NSLog("[Shiiru] resuming GIFs from checkpoint: \(resumed.count)/\(animations.count) already converted")
+            } else {
+                syncToken = String(UUID().uuidString.prefix(6))
+                directoryName = "\(key)-\(syncToken)"
+                directory = try store.prepareDirectory(named: directoryName)
+                store.writeCheckpoint(directory: directoryName, sourceHash: sourceHash)
+            }
             partialDirectory = directoryName
-            let directory = try store.prepareDirectory(named: directoryName)
 
-            for animation in animations {
+            for (index, animation) in animations.enumerated() where resumed[index] == nil {
                 _ = try? await telegram.downloadFile(startingOnly: animation.animation)
             }
             let manifestStickers = try await convertItems(
                 animations,
                 syncToken: syncToken,
                 directory: directory,
+                resumed: resumed,
                 weight: { $0.mimeType.hasPrefix("video") ? 10 : 2 },
                 onProgress: { [weak self] completed, total, fraction in
                     self?.phases[key] = .syncing(progress: fraction)
@@ -394,20 +490,22 @@ final class StickerSyncEngine: ObservableObject {
             // A cancelled sync must not publish — toggling off already
             // removed the pack, and upserting would resurrect it.
             try Task.checkCancellation()
+            store.clearCheckpoint(directory: directoryName)
             store.upsert(pack: StickerManifest.Pack(
                 id: key, name: key, title: "GIFs",
                 isAnimated: true,
                 kind: "gif",
                 converterVersion: StickerConverter.pipelineVersion,
                 sourceCount: animations.count,
-                sourceHash: SourceFingerprint.hash(of: animations.map(\.animation.remote.uniqueId)),
+                sourceHash: sourceHash,
                 directory: directoryName,
                 stickers: manifestStickers
             ))
             phases[key] = .synced
             Haptics.success()
         } catch is CancellationError {
-            rollBack(key: key, partialDirectory: partialDirectory)
+            // Keep the checkpointed partial for the next attempt.
+            rollBack(key: key, partialDirectory: nil)
         } catch {
             if !rollBack(key: key, partialDirectory: partialDirectory) {
                 let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription
@@ -423,13 +521,33 @@ final class StickerSyncEngine: ObservableObject {
             let set = try await telegram.stickerSet(id: info.id)
             let stickers = set.stickers
             guard !stickers.isEmpty else { throw ShiiruError.conversionFailed }
+            let sourceHash = SourceFingerprint.hash(of: stickers.map(\.sticker.remote.uniqueId))
 
-            let syncToken = String(UUID().uuidString.prefix(6))
-            let directoryName = "\(key)-\(syncToken)"
+            // An interrupted attempt at the same source resumes from its
+            // checkpoint instead of reconverting from zero.
+            let syncToken: String
+            let directoryName: String
+            let directory: URL
+            var resumed: [Int: StickerManifest.Sticker] = [:]
+            if let existing = store.resumableDirectory(forPackID: key, sourceHash: sourceHash) {
+                directoryName = existing
+                syncToken = String(existing.dropFirst(key.count + 1))
+                directory = AppGroup.stickersDirectory
+                    .appendingPathComponent(existing, isDirectory: true)
+                resumed = Self.convertedEntries(
+                    directory: directory, syncToken: syncToken,
+                    emojis: stickers.map(\.emoji)
+                )
+                NSLog("[Shiiru] resuming \(key) from checkpoint: \(resumed.count)/\(stickers.count) already converted")
+            } else {
+                syncToken = String(UUID().uuidString.prefix(6))
+                directoryName = "\(key)-\(syncToken)"
+                directory = try store.prepareDirectory(named: directoryName)
+                store.writeCheckpoint(directory: directoryName, sourceHash: sourceHash)
+            }
             partialDirectory = directoryName
-            let directory = try store.prepareDirectory(named: directoryName)
 
-            for sticker in stickers {
+            for (index, sticker) in stickers.enumerated() where resumed[index] == nil {
                 _ = try? await telegram.downloadFile(startingOnly: sticker.sticker)
             }
 
@@ -438,6 +556,7 @@ final class StickerSyncEngine: ObservableObject {
                 stickers,
                 syncToken: syncToken,
                 directory: directory,
+                resumed: resumed,
                 // Rough foreground cost ratios: webp ~instant, TGS renders
                 // in fractions of a second, webm decodes+encodes for many
                 // seconds.
@@ -473,6 +592,7 @@ final class StickerSyncEngine: ObservableObject {
                 Preferences.packOrder = [key] + Preferences.packOrder
             }
 
+            store.clearCheckpoint(directory: directoryName)
             store.upsert(pack: StickerManifest.Pack(
                 id: key,
                 name: set.name,
@@ -481,14 +601,16 @@ final class StickerSyncEngine: ObservableObject {
                 kind: info.stickerType == .stickerTypeCustomEmoji ? "emoji" : "sticker",
                 converterVersion: StickerConverter.pipelineVersion,
                 sourceCount: stickers.count,
-                sourceHash: SourceFingerprint.hash(of: stickers.map(\.sticker.remote.uniqueId)),
+                sourceHash: sourceHash,
                 directory: directoryName,
                 stickers: manifestStickers
             ))
             phases[key] = .synced
             Haptics.success()
         } catch is CancellationError {
-            rollBack(key: key, partialDirectory: partialDirectory)
+            // The checkpointed partial stays on disk; the next attempt at
+            // the same source resumes from it instead of starting over.
+            rollBack(key: key, partialDirectory: nil)
         } catch {
             if !rollBack(key: key, partialDirectory: partialDirectory) {
                 let message = (error as? TDLibKit.Error)?.friendlyMessage ?? error.localizedDescription

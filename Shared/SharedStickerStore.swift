@@ -86,10 +86,15 @@ final class SharedStickerStore {
         Set(loadManifest().packs.map(\.id))
     }
 
+    /// Sidecar marking a partial directory as a resumable checkpoint; holds
+    /// the source fingerprint the attempt was converting.
+    static let checkpointFileName = ".checkpoint"
+
     /// Deletes sticker directories no manifest pack references — leftovers
     /// of syncs that died between writing files and publishing (crash,
     /// jetsam). Only directories untouched for a day are removed, so an
-    /// in-flight sync's fresh output is never swept.
+    /// in-flight sync's fresh output is never swept; checkpointed partials
+    /// get a week to be resumed before they count as abandoned.
     func sweepUnreferencedDirectories(olderThan age: TimeInterval = 24 * 60 * 60) {
         let referenced = Set(loadManifest().packs.map(\.directoryName))
         guard let entries = try? fileManager.contentsOfDirectory(
@@ -97,6 +102,7 @@ final class SharedStickerStore {
             includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]
         ) else { return }
         let cutoff = Date(timeIntervalSinceNow: -age)
+        let checkpointCutoff = Date(timeIntervalSinceNow: -7 * 24 * 60 * 60)
         for entry in entries {
             guard let values = try? entry.resourceValues(
                 forKeys: [.contentModificationDateKey, .isDirectoryKey]
@@ -104,8 +110,52 @@ final class SharedStickerStore {
                   !referenced.contains(entry.lastPathComponent),
                   let modified = values.contentModificationDate, modified < cutoff
             else { continue }
+            let checkpoint = entry.appendingPathComponent(Self.checkpointFileName)
+            if let attributes = try? fileManager.attributesOfItem(atPath: checkpoint.path),
+               let stamped = attributes[.modificationDate] as? Date,
+               stamped > checkpointCutoff {
+                continue
+            }
             try? fileManager.removeItem(at: entry)
         }
+    }
+
+    /// Finds an unpublished partial directory for `packID` checkpointed
+    /// against the same source fingerprint — a resumable interrupted sync.
+    func resumableDirectory(forPackID packID: String, sourceHash: String) -> String? {
+        let referenced = Set(loadManifest().packs.map(\.directoryName))
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: AppGroup.stickersDirectory, includingPropertiesForKeys: nil
+        ) else { return nil }
+        for entry in entries {
+            let name = entry.lastPathComponent
+            guard name.hasPrefix("\(packID)-"), !referenced.contains(name),
+                  let data = try? Data(
+                      contentsOf: entry.appendingPathComponent(Self.checkpointFileName)
+                  ),
+                  String(decoding: data, as: UTF8.self) == sourceHash
+            else { continue }
+            return name
+        }
+        return nil
+    }
+
+    func writeCheckpoint(directory: String, sourceHash: String) {
+        try? Data(sourceHash.utf8).write(
+            to: AppGroup.stickersDirectory
+                .appendingPathComponent(directory, isDirectory: true)
+                .appendingPathComponent(Self.checkpointFileName)
+        )
+    }
+
+    /// Removes the checkpoint ahead of publishing — a published directory
+    /// is referenced by the manifest and needs no resume marker.
+    func clearCheckpoint(directory: String) {
+        try? fileManager.removeItem(
+            at: AppGroup.stickersDirectory
+                .appendingPathComponent(directory, isDirectory: true)
+                .appendingPathComponent(Self.checkpointFileName)
+        )
     }
 
     private func mutateManifest(_ mutate: (inout StickerManifest) -> Void) {
