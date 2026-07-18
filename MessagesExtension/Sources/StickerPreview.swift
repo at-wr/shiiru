@@ -45,11 +45,14 @@ enum StickerPreview {
     }
 
     // Messages extensions run under a much lower memory ceiling than apps;
-    // both caches together stay well below it and NSCache additionally
-    // responds to memory pressure.
+    // both caches together stay below it and NSCache additionally responds
+    // to memory pressure. The thumbnail limit is sized for scroll-back: a
+    // sticker-mode thumbnail is ~300 KB, and a fast flick through a large
+    // pack must still find the previous screens cached on the way back —
+    // a miss shows as a blank cell until the async decode lands.
     private static let thumbnailCache: NSCache<NSURL, UIImage> = {
         let cache = NSCache<NSURL, UIImage>()
-        cache.totalCostLimit = 16 << 20
+        cache.totalCostLimit = 64 << 20
         return cache
     }()
 

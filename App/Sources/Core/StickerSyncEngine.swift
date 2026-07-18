@@ -50,7 +50,11 @@ final class StickerSyncEngine: ObservableObject {
     private let thumbnailCache = NSCache<NSString, UIImage>()
     private let animationCache = NSCache<NSString, LottieAnimation>()
 
-    private var coverChain: Task<UIImage?, Never>?
+    /// Cover downloads run on a few round-robin lanes: enough parallelism
+    /// that a long pack list fills promptly, bounded so cover fetches never
+    /// crowd out sticker downloads.
+    private var coverLanes: [Task<UIImage?, Never>?] = [nil, nil, nil, nil]
+    private var nextCoverLane = 0
 
     private var pendingCovers: [String: Task<UIImage?, Never>] = [:]
 
@@ -523,7 +527,9 @@ final class StickerSyncEngine: ObservableObject {
         let id = key as String
         if let pending = pendingCovers[id] { return await pending.value }
 
-        let predecessor = coverChain
+        let lane = nextCoverLane
+        nextCoverLane = (nextCoverLane + 1) % coverLanes.count
+        let predecessor = coverLanes[lane]
         let task = Task { [telegram, thumbnailCache] () -> UIImage? in
             _ = await predecessor?.value
             guard let path = try? await telegram.download(file: file),
@@ -532,7 +538,7 @@ final class StickerSyncEngine: ObservableObject {
             thumbnailCache.setObject(image, forKey: key)
             return image
         }
-        coverChain = task
+        coverLanes[lane] = task
         pendingCovers[id] = task
         let image = await task.value
         pendingCovers[id] = nil
