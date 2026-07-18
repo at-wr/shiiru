@@ -68,6 +68,7 @@ struct StickerPacket {
 
 struct ParsedWebm {
     uint64_t videoTrack = 0;
+    bool isVP8 = false;
     uint64_t timecodeScale = 1'000'000;
     std::vector<StickerPacket> packets;
 };
@@ -131,8 +132,10 @@ ParsedWebm parseWebm(const uint8_t *bytes, size_t size) {
         case kCodecID: {
             codec.assign((const char *)reader.data + reader.pos, elementSize);
             reader.pos = end;
-            if (codec == "V_VP9" && result.videoTrack == 0 && pendingTrackNumber != 0) {
+            if ((codec == "V_VP9" || codec == "V_VP8") &&
+                result.videoTrack == 0 && pendingTrackNumber != 0) {
                 result.videoTrack = pendingTrackNumber;
+                result.isVP8 = (codec == "V_VP8");
             }
             break;
         }
@@ -227,8 +230,8 @@ struct Decoder {
     vpx_codec_ctx_t ctx {};
     bool ready = false;
 
-    bool init() {
-        ready = vpx_codec_dec_init(&ctx, vpx_codec_vp9_dx(), nullptr, 0) == VPX_CODEC_OK;
+    bool init(vpx_codec_iface_t *iface) {
+        ready = vpx_codec_dec_init(&ctx, iface, nullptr, 0) == VPX_CODEC_OK;
         return ready;
     }
 
@@ -258,8 +261,11 @@ struct Decoder {
     ParsedWebm parsed = parseWebm(bytes, file.length);
     if (parsed.videoTrack == 0 || parsed.packets.empty()) return nil;
 
+    // Telegram video stickers are VP9 by spec, but older or re-uploaded
+    // packs ship VP8 tracks; both decode through the same pipeline.
+    vpx_codec_iface_t *iface = parsed.isVP8 ? vpx_codec_vp8_dx() : vpx_codec_vp9_dx();
     Decoder colorDecoder, alphaDecoder;
-    if (!colorDecoder.init() || !alphaDecoder.init()) return nil;
+    if (!colorDecoder.init(iface) || !alphaDecoder.init(iface)) return nil;
 
     NSMutableArray<WebmStickerFrame *> *frames = [NSMutableArray array];
     for (const StickerPacket &packet : parsed.packets) {
