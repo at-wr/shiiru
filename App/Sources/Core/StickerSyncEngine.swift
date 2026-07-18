@@ -335,18 +335,22 @@ final class StickerSyncEngine: ObservableObject {
                     )
                 },
                 convert: { [telegram] animation in
+                    try Task.checkCancellation()
                     let path = try await telegram.download(file: animation.animation)
                     let isVideo = animation.mimeType.hasPrefix("video")
-                    let output: StickerConverter.Output = try await Task.detached(priority: .userInitiated) {
+                    let output: StickerConverter.Output = try await detachedCancellable {
                         if isVideo {
                             return try await StickerConverter.convertVideo(at: path)
                         }
                         return try StickerConverter.convertAnimatedImage(at: path)
-                    }.value
+                    }
                     return (output, "")
                 }
             )
             guard !manifestStickers.isEmpty else { throw ShiiruError.conversionFailed }
+            // A cancelled sync must not publish — toggling off already
+            // removed the pack, and upserting would resurrect it.
+            try Task.checkCancellation()
             store.upsert(pack: StickerManifest.Pack(
                 id: key, name: key, title: "GIFs",
                 isAnimated: true,
@@ -415,6 +419,9 @@ final class StickerSyncEngine: ObservableObject {
             )
 
             guard !manifestStickers.isEmpty else { throw ShiiruError.conversionFailed }
+            // A cancelled sync must not publish — toggling off already
+            // removed the pack, and upserting would resurrect it.
+            try Task.checkCancellation()
 
             // First-time packs pin to the top of the saved order — the same
             // spot the "NEW" row occupies — so they don't sink to the bottom
@@ -449,6 +456,7 @@ final class StickerSyncEngine: ObservableObject {
     }
 
     private func convert(sticker: Sticker) async throws -> StickerConverter.Output {
+        try Task.checkCancellation()
         // Custom emoji artwork rarely fills its canvas; crop and enlarge it
         // so the glyph doesn't float inside a mostly-empty sticker.
         var fill = false
@@ -459,26 +467,31 @@ final class StickerSyncEngine: ObservableObject {
         switch sticker.format {
         case .stickerFormatWebp:
             let path = try await telegram.download(file: sticker.sticker)
-            return .png(try await Task.detached(priority: .userInitiated) { [fill] in
+            return .png(try await detachedCancellable { [fill] in
                 try StickerConverter.convertStaticImage(at: path, fillCanvas: fill)
-            }.value)
+            })
         case .stickerFormatTgs:
             let path = try await telegram.download(file: sticker.sticker)
             return try await StickerConverter.convertTGS(at: path, fillCanvas: fill, profile: profile)
         case .stickerFormatWebm:
-
             let path = try await telegram.download(file: sticker.sticker)
-            if let animated = try? await Task.detached(priority: .userInitiated, operation: { [fill, profile] in
-                try StickerConverter.convertWebm(at: path, fillCanvas: fill, profile: profile)
-            }).value {
-                return animated
+            do {
+                return try await detachedCancellable { [fill, profile] in
+                    try StickerConverter.convertWebm(at: path, fillCanvas: fill, profile: profile)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Keep the pack usable, but leave a trace — a silent
+                // downgrade reads as "sticker randomly static" in the field.
+                NSLog("[Shiiru] webm conversion failed (%@), using static thumbnail", String(describing: error))
             }
 
             guard let thumbnail = sticker.thumbnail else { throw ShiiruError.unsupportedSticker }
             let thumbPath = try await telegram.download(file: thumbnail.file)
-            return .png(try await Task.detached(priority: .userInitiated) { [fill] in
+            return .png(try await detachedCancellable { [fill] in
                 try StickerConverter.convertStaticImage(at: thumbPath, fillCanvas: fill)
-            }.value)
+            })
         }
     }
 
@@ -575,5 +588,21 @@ private extension TelegramService {
     func downloadFile(startingOnly file: File) async throws {
         guard !file.local.isDownloadingCompleted else { return }
         _ = try await downloadStarting(file: file)
+    }
+}
+
+/// Runs blocking conversion work off the main actor while preserving the
+/// caller's cancellation. A bare `Task.detached` severs it — cancelling a
+/// sync would leave the current sticker (and with it the whole pack) grinding
+/// on to completion.
+func detachedCancellable<T: Sendable>(
+    priority: TaskPriority = .userInitiated,
+    _ work: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    let task = Task.detached(priority: priority) { try await work() }
+    return try await withTaskCancellationHandler {
+        try await task.value
+    } onCancel: {
+        task.cancel()
     }
 }

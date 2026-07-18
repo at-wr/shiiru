@@ -22,6 +22,9 @@ public enum APNGEncoder {
         var rasters: [[UInt8]] = []
         rasters.reserveCapacity(frames.count)
         for frame in frames {
+            // A cancelled sync bails between frames; callers treat nil like
+            // an over-budget attempt and observe the cancellation upstream.
+            if Task.isCancelled { return nil }
             guard let raster = rasterize(frame.image, width: width, height: height) else { return nil }
             rasters.append(raster)
         }
@@ -71,6 +74,7 @@ public enum APNGEncoder {
 
         var previous: [UInt8]?
         for (frameIndex, frame) in indexedFrames.enumerated() {
+            if Task.isCancelled { return nil }
             let indexed = frame.pixels
 
             var rect = (x: 0, y: 0, w: width, h: height)
