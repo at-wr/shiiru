@@ -687,8 +687,25 @@ final class StickerSyncEngine: ObservableObject {
         // here only adds head-of-line blocking — a slow cover used to hold
         // up ready ones behind it, which is what made a fresh login's list
         // fill so much worse than a refresh.
+        let setID = info.id
         let task = Task { [telegram, thumbnailCache] () -> UIImage? in
-            guard let path = try? await telegram.download(file: file),
+            do {
+                let path = try await telegram.download(file: file)
+                guard let image = UIImage(contentsOfFile: path) else { return nil }
+                thumbnailCache.setObject(image, forKey: key)
+                return image
+            } catch is CancellationError {
+                return nil
+            } catch {
+                NSLog("[Shiiru] cover download failed for set %@: %@", id, String(describing: error))
+            }
+            // Covers fetched moments after login can carry file references
+            // the settling session has already invalidated; a fresh set
+            // fetch mints new ones. Manual pull-to-refresh worked for
+            // exactly this reason — do it ourselves.
+            guard let set = try? await telegram.stickerSet(id: setID),
+                  let freshFile = set.thumbnail?.file ?? set.stickers.first?.thumbnail?.file,
+                  let path = try? await telegram.download(file: freshFile),
                   let image = UIImage(contentsOfFile: path)
             else { return nil }
             thumbnailCache.setObject(image, forKey: key)

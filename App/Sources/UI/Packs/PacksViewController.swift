@@ -181,6 +181,7 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
             // apply on open too, not only in the nightly window.
             BackgroundMaintenance.runCheck()
             tableView.reloadData()
+            scheduleCoverBackfill()
         } catch {
             let alert = UIAlertController(
                 title: "Couldn't Load Stickers",
@@ -305,6 +306,28 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
     /// Phase ticks arrive for every converted sticker; update only the
     /// status/progress of visible cells. Re-running the full `configure`
     /// here re-fired cover loads and made thumbnails flash on every tick.
+    private var coverBackfill: Task<Void, Never>?
+
+    /// Covers that failed their first attempt (stale file references right
+    /// after login, transient errors) converge without a manual refresh:
+    /// whatever is still missing gets re-requested on an exponential
+    /// backoff until the list is complete.
+    private func scheduleCoverBackfill() {
+        guard coverBackfill == nil else { return }
+        coverBackfill = Task { [weak self] in
+            defer { self?.coverBackfill = nil }
+            for delay in [2.0, 4, 8, 16] {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self, !Task.isCancelled else { return }
+                let missing = self.visibleSets.prefix(24).contains {
+                    StickerSyncEngine.shared.cachedCover(for: $0) == nil
+                }
+                guard missing else { return }
+                self.tableView.reloadData()
+            }
+        }
+    }
+
     private func reloadVisibleRows() {
         for cell in tableView.visibleCells {
             guard let cell = cell as? PackCell, let id = cell.representedID else { continue }
@@ -445,18 +468,13 @@ final class PacksViewController: UIViewController, UITableViewDataSource, UITabl
         if let cachedAnimation { cell.setAnimatedThumbnail(cachedAnimation) }
         guard cachedCover == nil || cachedAnimation == nil else { return }
         Task { [weak cell] in
-            if cachedCover == nil {
-                var image = await StickerSyncEngine.shared.coverImage(for: info)
-                if image == nil {
-                    // First-login covers can race TDLib settling into the
-                    // session; a delayed second attempt heals them without
-                    // waiting for a manual refresh.
-                    try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    image = await StickerSyncEngine.shared.coverImage(for: info)
-                }
-                if let image, cell?.representedID == packID {
-                    cell?.setThumbnail(image, animated: true)
-                }
+            // Failure recovery lives below the cell: coverImage retries
+            // with fresh file references, and the controller's backfill
+            // pass re-requests anything still missing.
+            if cachedCover == nil,
+               let image = await StickerSyncEngine.shared.coverImage(for: info),
+               cell?.representedID == packID {
+                cell?.setThumbnail(image, animated: true)
             }
             if cachedAnimation == nil,
                let animation = await StickerSyncEngine.shared.animatedCover(for: info),
