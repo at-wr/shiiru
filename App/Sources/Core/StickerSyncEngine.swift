@@ -31,10 +31,29 @@ final class StickerSyncEngine: ObservableObject {
     /// automatic backlog (stale re-conversions, drift repairs) so the pack
     /// the user just toggled is what runs — and what the background pill
     /// tracks — instead of waiting behind a migration storm.
-    private struct PendingSync {
+    struct PendingSync {
         let key: String
         let userInitiated: Bool
+        /// Rough conversion cost (item count × per-format weight), used to
+        /// order the queue when the app backgrounds.
+        var estimatedCost: Double = 0
         let run: () async -> Void
+    }
+
+    /// Background execution can end at any moment and only completed packs
+    /// survive the checkpoint — a half-converted pack rolls back. Running
+    /// the cheap packs first maximizes how many land durably before the
+    /// window closes; the user-initiated-first partition is preserved.
+    static func backgroundPriority(_ items: [PendingSync]) -> [PendingSync] {
+        items.enumerated().sorted { lhs, rhs in
+            if lhs.element.userInitiated != rhs.element.userInitiated {
+                return lhs.element.userInitiated
+            }
+            if lhs.element.estimatedCost != rhs.element.estimatedCost {
+                return lhs.element.estimatedCost < rhs.element.estimatedCost
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
     }
 
     private var pendingSyncs: [PendingSync] = []
@@ -62,6 +81,14 @@ final class StickerSyncEngine: ObservableObject {
         for id in store.syncedPackIDs() {
             phases[id] = .synced
         }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.pendingSyncs.count > 1 else { return }
+                self.pendingSyncs = Self.backgroundPriority(self.pendingSyncs)
+            }
+        }
     }
 
     func phase(for setID: TdInt64) -> Phase {
@@ -78,7 +105,14 @@ final class StickerSyncEngine: ObservableObject {
             guard !queuedKeys.contains(key) else { return }
             phases[key] = .syncing(progress: 0)
             SyncBackgroundSession.shared.packQueued(key: key, userInitiated: userInitiated)
-            enqueue(PendingSync(key: key, userInitiated: userInitiated) { [weak self] in
+            // Same per-format weights the progress bar uses; covers are a
+            // reliable proxy for the pack's dominant format.
+            let weight: Double = info.covers.contains { $0.format == .stickerFormatWebm } ? 20
+                : info.covers.contains { $0.format == .stickerFormatTgs } ? 6 : 1
+            enqueue(PendingSync(
+                key: key, userInitiated: userInitiated,
+                estimatedCost: Double(info.size) * weight
+            ) { [weak self] in
                 await self?.sync(info: info, key: key)
             })
         } else {
@@ -205,7 +239,12 @@ final class StickerSyncEngine: ObservableObject {
             guard !queuedKeys.contains(key) else { return }
             phases[key] = .syncing(progress: 0)
             SyncBackgroundSession.shared.packQueued(key: key, userInitiated: userInitiated)
-            enqueue(PendingSync(key: key, userInitiated: userInitiated) { [weak self] in
+            enqueue(PendingSync(
+                key: key, userInitiated: userInitiated,
+                // Saved GIFs are all video decodes; size is unknown until
+                // fetched, so they sort with the heavy packs.
+                estimatedCost: .greatestFiniteMagnitude
+            ) { [weak self] in
                 await self?.syncGifs(key: key)
             })
         } else {

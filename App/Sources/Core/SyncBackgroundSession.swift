@@ -63,7 +63,22 @@ final class SyncBackgroundSession {
     /// Non-nil while the pill is retitled to the waiting-for-network state.
     private var offlineSince: Date?
 
-    private init() {}
+    private init() {
+        // An expired or user-cancelled continued task never runs again on
+        // its own (the API only extends foreground time) — but the sync
+        // queue survives and resumes when the app returns. Re-arming the
+        // keepalive on activation means the next trip to the background
+        // rides a fresh continued task instead of freezing silently.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.syncing else { return }
+                Self.trace("app active with sync in flight; re-arming keepalive")
+                self.beginIfNeeded()
+            }
+        }
+    }
 
     // MARK: - Engine hooks
 
